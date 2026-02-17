@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+VERSION = "0.2.0"
+
 import logging
 from contextlib import asynccontextmanager
 
@@ -46,4 +48,5 @@ async def health():
     return {
         "status": "ok",
         "env": settings.env,
+        "version": VERSION,
     }
