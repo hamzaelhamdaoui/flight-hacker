@@ -19,14 +19,32 @@ export async function searchFlights(params) {
   })
 }
 
-export async function exploreFlights(params) {
+export async function exploreFlights(params, onProgress) {
   const qs = new URLSearchParams()
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '' && v !== false) qs.set(k, v)
   })
-  // direct_only should be sent as true when enabled
   if (params.direct_only === true) qs.set('direct_only', 'true')
-  return request(`/api/explore?${qs.toString()}`)
+
+  // Start async job
+  const job = await request(`/api/explore?${qs.toString()}`, { method: 'POST' })
+  if (!job.job_id) {
+    // Fallback: direct response (no async)
+    return job
+  }
+
+  // Poll for results
+  const jobId = job.job_id
+  const maxAttempts = 120 // 10 min max
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, 3000)) // 3s between polls
+    if (onProgress) onProgress(i)
+    const status = await request(`/api/explore/status/${jobId}`)
+    if (status.status === 'done') return status
+    if (status.status === 'error') throw new Error(status.error || 'Explore failed')
+    if (status.status === 'not_found') throw new Error('Job expired')
+  }
+  throw new Error('Explore timed out')
 }
 
 export async function fetchLocations(query) {

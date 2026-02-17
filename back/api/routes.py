@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import uuid
+from typing import Any
+
 from fastapi import APIRouter, Query
 
 from api.schemas import (
@@ -14,6 +18,9 @@ from services.locations import search_locations
 from services.search import run_explore, run_search
 
 router = APIRouter()
+
+# In-memory job store for async explore
+_explore_jobs: dict[str, dict[str, Any]] = {}
 
 STRATEGY_LIST = [
     StrategyInfo(id="standard", name="Standard Search", description="Direct search for the best prices", default=True),
@@ -37,6 +44,54 @@ async def search_flights(req: SearchRequest) -> SearchResponse:
     return SearchResponse(**result)
 
 
+async def _run_explore_job(job_id: str, kwargs: dict[str, Any]) -> None:
+    """Background task that runs explore and stores result."""
+    try:
+        result = await run_explore(**kwargs)
+        _explore_jobs[job_id] = {"status": "done", "result": result}
+    except Exception as e:
+        _explore_jobs[job_id] = {"status": "error", "error": str(e)}
+
+
+@router.post("/api/explore")
+async def explore_flights_async(
+    origin: str = Query(...),
+    budget: int = Query(500),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    nights_min: int = Query(2),
+    nights_max: int = Query(7),
+    flight_type: str = Query("round"),
+    continent: str | None = Query(None),
+    max_duration: float | None = Query(None),
+    direct_only: bool = Query(False),
+    sort_by: str = Query("price"),
+) -> dict[str, str]:
+    job_id = str(uuid.uuid4())[:8]
+    _explore_jobs[job_id] = {"status": "running"}
+    kwargs = dict(
+        origin=origin, budget=budget, date_from=date_from, date_to=date_to,
+        nights_min=nights_min, nights_max=nights_max, flight_type=flight_type,
+        continent=continent, max_duration=max_duration, direct_only=direct_only,
+        sort_by=sort_by,
+    )
+    asyncio.create_task(_run_explore_job(job_id, kwargs))
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.get("/api/explore/status/{job_id}")
+async def explore_status(job_id: str) -> dict[str, Any]:
+    job = _explore_jobs.get(job_id)
+    if not job:
+        return {"status": "not_found"}
+    if job["status"] == "done":
+        result = job["result"]
+        # Clean up after retrieval
+        del _explore_jobs[job_id]
+        return {"status": "done", **result}
+    return {"status": job["status"], "error": job.get("error")}
+
+
 @router.get("/api/explore", response_model=ExploreResponse)
 async def explore_flights(
     origin: str = Query(...),
@@ -52,16 +107,9 @@ async def explore_flights(
     sort_by: str = Query("price"),
 ) -> ExploreResponse:
     result = await run_explore(
-        origin=origin,
-        budget=budget,
-        date_from=date_from,
-        date_to=date_to,
-        nights_min=nights_min,
-        nights_max=nights_max,
-        flight_type=flight_type,
-        continent=continent,
-        max_duration=max_duration,
-        direct_only=direct_only,
+        origin=origin, budget=budget, date_from=date_from, date_to=date_to,
+        nights_min=nights_min, nights_max=nights_max, flight_type=flight_type,
+        continent=continent, max_duration=max_duration, direct_only=direct_only,
         sort_by=sort_by,
     )
     return ExploreResponse(**result)

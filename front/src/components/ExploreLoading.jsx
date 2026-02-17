@@ -29,10 +29,15 @@ const STRATEGY_NAMES = [
   "Calculating savings",
 ]
 
-export default function ExploreLoading({ budget }) {
+export default function ExploreLoading({ budget, pollCount = 0, continent }) {
   const [factIndex, setFactIndex] = useState(0)
   const [strategyIndex, setStrategyIndex] = useState(0)
-  const [progress, setProgress] = useState(0)
+
+  const isDeepSearch = !!continent
+  // Deep search ~60 polls (3s each = 3min), normal ~5 polls (15s)
+  const maxPolls = isDeepSearch ? 60 : 5
+  const progress = Math.min((pollCount / maxPolls) * 100, 95)
+  const elapsedSec = pollCount * 3
 
   useEffect(() => {
     const factTimer = setInterval(() => {
@@ -46,18 +51,6 @@ export default function ExploreLoading({ budget }) {
       setStrategyIndex(i => (i + 1) % STRATEGY_NAMES.length)
     }, 1500)
     return () => clearInterval(strategyTimer)
-  }, [])
-
-  useEffect(() => {
-    const start = Date.now()
-    const duration = 15000
-    const tick = () => {
-      const elapsed = Date.now() - start
-      const pct = Math.min((elapsed / duration) * 100, 95)
-      setProgress(pct)
-      if (pct < 95) requestAnimationFrame(tick)
-    }
-    requestAnimationFrame(tick)
   }, [])
 
   return (
@@ -82,8 +75,16 @@ export default function ExploreLoading({ budget }) {
 
       {/* Scanning text */}
       <p className="font-display text-lg font-semibold text-warm-800 mb-2">
-        Scanning €{budget} deals across strategies...
+        {isDeepSearch
+          ? `Deep scanning ${continent} — searching every country...`
+          : `Scanning €${budget} deals across strategies...`
+        }
       </p>
+      {isDeepSearch && elapsedSec > 0 && (
+        <p className="font-body text-xs text-warm-400 mb-1">
+          {elapsedSec}s elapsed — this takes ~2-3 min for continent searches
+        </p>
+      )}
 
       {/* Strategy name cycling */}
       <motion.p

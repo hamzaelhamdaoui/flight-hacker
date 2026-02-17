@@ -52,7 +52,7 @@ export default function ExploreView() {
   const [directOnly, setDirectOnly] = useState(false)
   const [sortBy, setSortBy] = useState('price')
 
-  const { results, loading, error, explore } = useExplore()
+  const { results, loading, error, explore, pollCount } = useExplore()
 
   const doSearch = () => {
     if (!origin) return
@@ -276,7 +276,7 @@ export default function ExploreView() {
       )}
 
       {/* Loading animation */}
-      {loading && <ExploreLoading budget={budget} />}
+      {loading && <ExploreLoading budget={budget} pollCount={pollCount} continent={continent} />}
 
       {/* Results grid */}
       {results && !loading && (
