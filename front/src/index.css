@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-warm-50 text-warm-900 font-body;
+  }
+
+  ::selection {
+    @apply bg-coral-200 text-coral-900;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-coral-500 px-6 py-3 font-display font-semibold text-white shadow-lg shadow-coral-500/25 transition hover:bg-coral-600 hover:shadow-xl hover:shadow-coral-500/30 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border-2 border-warm-200 bg-white px-5 py-2.5 font-display font-medium text-warm-700 transition hover:border-warm-300 hover:bg-warm-50 active:scale-[0.98];
+  }
+
+  .card {
+    @apply rounded-2xl border border-warm-200 bg-white shadow-sm transition;
+  }
+
+  .input-field {
+    @apply w-full rounded-xl border-2 border-warm-200 bg-white px-4 py-3 font-body text-warm-900 placeholder-warm-400 transition focus:border-coral-400 focus:outline-none focus:ring-4 focus:ring-coral-100;
+  }
+}
+
+/* Skeleton pulse animation */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #f3f1ed 25%, #e8e4dd 50%, #f3f1ed 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 0.5rem;
+}
