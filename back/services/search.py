@@ -272,6 +272,123 @@ def _extract_explore_item(item: dict[str, Any], origin_upper: str) -> dict[str, 
     }
 
 
+def _get_countries_for_continent(cont: str) -> list[str]:
+    """Return all country codes for a given continent."""
+    return [cc for cc, c in COUNTRY_TO_CONTINENT.items() if c == cont]
+
+
+def _parse_explore_item(item: dict, origin_upper: str, strategy: str = "standard") -> dict[str, Any] | None:
+    """Parse a single Kiwi flight item into an explore result dict."""
+    fly_from = item.get("flyFrom", "")
+    city_code_to = item.get("cityCodeTo", "")
+    city_to = item.get("cityTo", "")
+    fly_to = item.get("flyTo", "")
+    country_code = item.get("countryTo", {}).get("code", "")
+    price = item.get("price", 0)
+
+    # Verify return goes back to origin for round-trip
+    route = item.get("route", [])
+    if route:
+        last_seg = route[-1]
+        ret_city = last_seg.get("cityCodeTo", "").upper()
+        ret_apt = last_seg.get("flyTo", "").upper()
+        if ret_city != origin_upper and ret_apt != origin_upper:
+            return None
+
+    duration_dep = item.get("duration", {}).get("departure", 0)
+    if isinstance(duration_dep, dict):
+        duration_dep = duration_dep.get("total", 0)
+    route_out = sum(1 for r in route if r.get("return", 0) == 0)
+
+    return {
+        "city": city_to,
+        "city_code": city_code_to,
+        "country": item.get("countryTo", {}).get("name", ""),
+        "country_code": country_code,
+        "price": price,
+        "local_departure": item.get("local_departure", ""),
+        "local_arrival": item.get("local_arrival", ""),
+        "deep_link": item.get("deep_link", ""),
+        "fly_from": fly_from,
+        "fly_to": fly_to,
+        "nights_in_dest": item.get("nightsInDest") or 0,
+        "airlines": item.get("airlines", []),
+        "continent": get_continent(country_code),
+        "distance_km": round(item.get("distance", 0)),
+        "flight_duration_hours": round(duration_dep / 3600, 1) if duration_dep else 0,
+        "is_direct": route_out <= 1,
+        "best_strategy": strategy,
+        "savings_pct": 0,
+        "virtual_interlining": item.get("virtual_interlining", False),
+    }
+
+
+async def _explore_continent(
+    client: Any,
+    origin_code: str,
+    fly_from_all: str,
+    countries: list[str],
+    base_params: dict[str, Any],
+    origin_upper: str,
+    budget: int,
+) -> list[dict[str, Any]]:
+    """Aggressive country-by-country search for a specific continent.
+    For each country: round-trip standard, round-trip VI, round-trip from nearby airports.
+    """
+    searches: list[tuple[str, dict[str, Any]]] = []
+
+    for cc in countries:
+        # Standard round-trip to country
+        searches.append((f"rt_{cc}", {
+            **base_params, "fly_from": origin_code, "fly_to": cc,
+            "limit": 200, "sort": "price",
+        }))
+        # With virtual interlining
+        searches.append((f"vi_{cc}", {
+            **base_params, "fly_from": origin_code, "fly_to": cc,
+            "limit": 200, "sort": "price", "enable_vi": "true",
+        }))
+        # From nearby airports
+        searches.append((f"nearby_{cc}", {
+            **base_params, "fly_from": fly_from_all, "fly_to": cc,
+            "limit": 200, "sort": "price",
+        }))
+
+    logger.info(f"Continent explore: {len(searches)} searches for {len(countries)} countries")
+
+    # Execute all in parallel (rate limiter in client handles throttling)
+    coros = [client.search(p) for _, p in searches]
+    raw = await asyncio.gather(*coros, return_exceptions=True)
+
+    city_best: dict[str, dict[str, Any]] = {}
+
+    for i, (label, _) in enumerate(searches):
+        data = raw[i]
+        if isinstance(data, Exception):
+            logger.warning(f"Explore {label} failed: {data}")
+            continue
+        items = data.get("data", []) if isinstance(data, dict) else []
+
+        strategy = "standard"
+        if label.startswith("vi_"):
+            strategy = "mixed_carrier"
+        elif label.startswith("nearby_"):
+            strategy = "nearby_airport"
+
+        for item in items:
+            price = item.get("price", 0)
+            if budget and price > budget:
+                continue
+            result = _parse_explore_item(item, origin_upper, strategy)
+            if not result:
+                continue
+            city_key = result["city_code"] or result["city"]
+            if city_key not in city_best or price < city_best[city_key]["price"]:
+                city_best[city_key] = result
+
+    return list(city_best.values())
+
+
 async def run_explore(
     origin: str,
     budget: int,
@@ -296,29 +413,55 @@ async def run_explore(
     d_from = date_from or _format_date(today + timedelta(days=7))
     d_to = date_to or _format_date(today + timedelta(days=90))
 
-    # --- Phase 1: Multi-pronged discovery (NO price_to — we want to DISCOVER destinations) ---
-    # Search 1: Standard from origin, sorted by price, no price cap (discover everything)
-    # Search 2: Same but with virtual interlining (mixed carrier deals)
-    # Search 3: From nearby airports (nearby airport arbitrage)
-    # Search 4: Direct flights only (users love these)
-
     nearby = await get_nearby_airports(origin_code, radius_km=250)
     nearby_codes = [a.get("code", "") for a in nearby if a.get("code") and a.get("code") != origin_code][:5]
     fly_from_all = ",".join([origin_code] + nearby_codes) if nearby_codes else origin_code
 
-    base = {
+    base_rt = {
         "date_from": d_from,
         "date_to": d_to,
         "curr": "EUR",
-        "sort": "price",
         "adults": 1,
         "selected_cabins": "M",
         "nights_in_dst_from": nights_min,
         "nights_in_dst_to": nights_max,
     }
 
-    # one_for_city only works on one-way, but it's the ONLY way to get diverse destinations
-    # We do one-way discovery first, then round-trip pricing for found cities
+    # =====================================================
+    # If continent is specified → aggressive per-country search
+    # =====================================================
+    if continent:
+        countries = _get_countries_for_continent(continent)
+        if not countries:
+            return {"results": [], "total": 0, "origin": origin_code}
+
+        explore_results = await _explore_continent(
+            client, origin_code, fly_from_all, countries, base_rt, origin_upper, budget
+        )
+
+        # Apply remaining filters
+        if max_duration:
+            explore_results = [r for r in explore_results if r["flight_duration_hours"] <= max_duration]
+        if direct_only:
+            explore_results = [r for r in explore_results if r["is_direct"]]
+
+        sort_keys = {
+            "price": lambda r: r["price"],
+            "distance": lambda r: r["distance_km"],
+            "duration": lambda r: r["flight_duration_hours"],
+            "destination": lambda r: r["city"].lower(),
+        }
+        explore_results.sort(key=sort_keys.get(sort_by, sort_keys["price"]))
+
+        return {
+            "results": explore_results,
+            "total": len(explore_results),
+            "origin": origin_code,
+        }
+
+    # =====================================================
+    # No continent → generic everywhere discovery (original logic)
+    # =====================================================
     discovery_base = {
         "fly_from": origin_code,
         "date_from": d_from,
@@ -331,14 +474,13 @@ async def run_explore(
     }
 
     searches = [
-        # One-way discovery — one_for_city gets us MANY different destinations
         ("discovery", {**discovery_base, "limit": 500}),
         ("discovery_vi", {**discovery_base, "limit": 500, "enable_vi": "true"}),
         ("discovery_nearby", {**discovery_base, "fly_from": fly_from_all, "limit": 500}),
-        ("roundtrip", {**base, "fly_from": origin_code, "limit": 500}),
-        ("roundtrip_vi", {**base, "fly_from": origin_code, "limit": 500, "enable_vi": "true"}),
-        ("roundtrip_nearby", {**base, "fly_from": fly_from_all, "limit": 500}),
-        ("direct", {**base, "fly_from": origin_code, "limit": 300, "max_stopovers": 0}),
+        ("roundtrip", {**base_rt, "fly_from": origin_code, "limit": 500, "sort": "price"}),
+        ("roundtrip_vi", {**base_rt, "fly_from": origin_code, "limit": 500, "sort": "price", "enable_vi": "true"}),
+        ("roundtrip_nearby", {**base_rt, "fly_from": fly_from_all, "limit": 500, "sort": "price"}),
+        ("direct", {**base_rt, "fly_from": origin_code, "limit": 300, "sort": "price", "max_stopovers": 0}),
     ]
 
     tasks = []
@@ -347,11 +489,8 @@ async def run_explore(
 
     raw = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
 
-    # --- Phase 2: Aggregate best per city across all searches ---
     city_best: dict[str, dict[str, Any]] = {}
     city_max_price: dict[str, int] = {}
-
-    # Track which cities we discovered (one-way) vs have round-trip prices for
     discovered_cities: set[str] = set()
     has_roundtrip: set[str] = set()
 
@@ -372,9 +511,7 @@ async def run_explore(
             country_code = item.get("countryTo", {}).get("code", "")
             price = item.get("price", 0)
 
-            # Must depart from origin area
             if city_code_from.upper() != origin_upper and fly_from.upper() != origin_upper:
-                # For nearby airport searches, allow nearby origins
                 if "nearby" not in label:
                     continue
 
@@ -385,7 +522,6 @@ async def run_explore(
             if is_discovery:
                 discovered_cities.add(city_key)
             else:
-                # For round-trip, verify return goes back to origin
                 route = item.get("route", [])
                 if route:
                     last_seg = route[-1]
@@ -421,7 +557,6 @@ async def run_explore(
                 "is_roundtrip": not is_discovery,
             }
 
-            # Tag strategy
             if "vi" in label and item.get("virtual_interlining"):
                 result["best_strategy"] = "mixed_carrier"
             elif "nearby" in label and fly_from.upper() != origin_upper:
@@ -431,30 +566,24 @@ async def run_explore(
 
             city_max_price[city_key] = max(city_max_price.get(city_key, 0), price)
 
-            # Prefer round-trip over discovery; then cheapest
             if city_key not in city_best:
                 city_best[city_key] = result
             else:
                 existing = city_best[city_key]
-                # Round-trip always beats discovery
                 if not existing.get("is_roundtrip") and result.get("is_roundtrip"):
                     city_best[city_key] = result
                 elif existing.get("is_roundtrip") == result.get("is_roundtrip") and price < existing["price"]:
                     city_best[city_key] = result
 
-    # --- Phase 3: Enrich with savings ---
     explore_results: list[dict[str, Any]] = []
     for city_key, result in city_best.items():
         max_p = city_max_price.get(city_key, result["price"])
         if max_p > result["price"] and max_p > 0:
             result["savings_pct"] = round((1 - result["price"] / max_p) * 100, 1)
-        # Mark discovery-only results (no round-trip found)
         is_rt = result.pop("is_roundtrip", False)
         if not is_rt:
-            # Discovery-only: price is one-way, estimate round-trip
-            result["price"] = result["price"] * 2  # rough estimate
+            result["price"] = result["price"] * 2
             result["best_strategy"] = "estimated"
-            # Replace one-way deep_link with a round-trip search link on Kiwi
             city_code = result.get("city_code") or result.get("fly_to", "")
             if city_code and origin_code:
                 result["deep_link"] = (
@@ -465,11 +594,8 @@ async def run_explore(
                 )
         explore_results.append(result)
 
-    # --- Phase 4: Apply filters ---
     if budget:
         explore_results = [r for r in explore_results if r["price"] <= budget]
-    if continent:
-        explore_results = [r for r in explore_results if r["continent"] == continent]
     if max_duration:
         explore_results = [r for r in explore_results if r["flight_duration_hours"] <= max_duration]
     if direct_only:

@@ -50,8 +50,8 @@ export default function Layout({ children, activeTab, onTabChange }) {
         {children}
       </main>
 
-      <footer className="hidden md:block text-center py-3 text-xs font-body text-warm-400 border-t border-warm-100">
-        Flight Hacker v0.2.0
+      <footer className="text-center py-3 pb-20 md:pb-3 text-xs font-body text-warm-400">
+        v0.3.0
       </footer>
 
       {/* Mobile bottom nav */}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 import logging
 from contextlib import asynccontextmanager
