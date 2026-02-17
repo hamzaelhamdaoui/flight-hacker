@@ -51,7 +51,7 @@ export default function Layout({ children, activeTab, onTabChange }) {
       </main>
 
       <footer className="text-center py-3 pb-20 md:pb-3 text-xs font-body text-warm-400">
-        v0.3.1
+        v0.3.2
       </footer>
 
       {/* Mobile bottom nav */}

@@ -120,6 +120,10 @@ def _build_search_params(req: SearchRequest, origin_code: str, dest_code: str | 
 
 
 async def run_search(req: SearchRequest) -> dict[str, Any]:
+    # Validate & auto-fix nights
+    if req.nights_min and req.nights_max and req.nights_min > req.nights_max:
+        req.nights_min, req.nights_max = req.nights_max, req.nights_min
+
     origin_code = await resolve_location(req.origin)
     dest_code = await resolve_location(req.destination) if req.destination else None
 
@@ -172,6 +176,10 @@ async def run_search(req: SearchRequest) -> dict[str, Any]:
             if flight.savings_pct is None and flight.strategy != "standard" and flight.price < standard_price:
                 flight.savings_pct = round((1 - flight.price / standard_price) * 100, 1)
                 flight.savings_vs = standard_price
+
+    # Post-filter by max_price (some strategies build their own params and skip it)
+    if req.max_price:
+        all_results = [f for f in all_results if f.price <= req.max_price]
 
     all_results.sort(key=lambda r: r.price)
 
