@@ -98,7 +98,7 @@ class BackToBackStrategy(BaseStrategy):
             "nights_in_dst_to": 2,
             "curr": "EUR",
             "sort": "price",
-            "limit": 10,
+            "limit": 100,
             "adults": params.get("adults", 1),
             "selected_cabins": params.get("selected_cabins", "M"),
         }
@@ -113,7 +113,7 @@ class BackToBackStrategy(BaseStrategy):
             "nights_in_dst_to": 2,
             "curr": "EUR",
             "sort": "price",
-            "limit": 10,
+            "limit": 100,
             "adults": params.get("adults", 1),
             "selected_cabins": params.get("selected_cabins", "M"),
         }

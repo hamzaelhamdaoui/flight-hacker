@@ -22,8 +22,10 @@ export async function searchFlights(params) {
 export async function exploreFlights(params) {
   const qs = new URLSearchParams()
   Object.entries(params).forEach(([k, v]) => {
-    if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    if (v !== undefined && v !== null && v !== '' && v !== false) qs.set(k, v)
   })
+  // direct_only should be sent as true when enabled
+  if (params.direct_only === true) qs.set('direct_only', 'true')
   return request(`/api/explore?${qs.toString()}`)
 }
 

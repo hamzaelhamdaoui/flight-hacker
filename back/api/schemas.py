@@ -113,6 +113,12 @@ class ExploreResult(BaseModel):
     fly_to: str = ""
     nights_in_dest: int = 0
     airlines: list[str] = Field(default_factory=list)
+    continent: str = ""
+    distance_km: int = 0
+    flight_duration_hours: float = 0
+    is_direct: bool = False
+    best_strategy: str = "standard"
+    savings_pct: float = 0
 
 
 class ExploreResponse(BaseModel):

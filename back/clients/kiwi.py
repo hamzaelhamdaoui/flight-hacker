@@ -61,8 +61,8 @@ class KiwiClient:
         settings = get_settings()
         self._search_key = settings.kiwi_api_key_search
         self._multi_key = settings.kiwi_api_key_multi
-        self._client = httpx.AsyncClient(timeout=30.0)
-        self._bucket = TokenBucket(rate=30, period=60)
+        self._client = httpx.AsyncClient(timeout=60.0)
+        self._bucket = TokenBucket(rate=25, period=60)  # conservative to avoid 429s
         self._loc_cache = LocationCache(ttl=3600)
 
     async def _request(
@@ -72,7 +72,7 @@ class KiwiClient:
         api_key: str,
         params: dict | None = None,
         json_body: dict | None = None,
-        retries: int = 3,
+        retries: int = 5,
     ) -> Any:
         headers = {
             "apikey": api_key,

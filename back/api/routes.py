@@ -46,6 +46,10 @@ async def explore_flights(
     nights_min: int = Query(2),
     nights_max: int = Query(7),
     flight_type: str = Query("round"),
+    continent: str | None = Query(None),
+    max_duration: float | None = Query(None),
+    direct_only: bool = Query(False),
+    sort_by: str = Query("price"),
 ) -> ExploreResponse:
     result = await run_explore(
         origin=origin,
@@ -55,6 +59,10 @@ async def explore_flights(
         nights_min=nights_min,
         nights_max=nights_max,
         flight_type=flight_type,
+        continent=continent,
+        max_duration=max_duration,
+        direct_only=direct_only,
+        sort_by=sort_by,
     )
     return ExploreResponse(**result)
 

@@ -47,3 +47,18 @@
   animation: shimmer 1.5s ease-in-out infinite;
   border-radius: 0.5rem;
 }
+
+/* Explore loading — animated plane on path */
+@keyframes explore-fly {
+  0% {
+    offset-distance: 0%;
+  }
+  100% {
+    offset-distance: 100%;
+  }
+}
+
+.explore-plane-track svg .explore-plane {
+  offset-path: path('M 20 60 Q 80 10, 160 40 Q 240 70, 300 20');
+  animation: explore-fly 3s ease-in-out infinite alternate;
+}

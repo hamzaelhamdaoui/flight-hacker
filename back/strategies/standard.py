@@ -18,7 +18,7 @@ class StandardStrategy(BaseStrategy):
             "date_to": params["date_to"],
             "curr": "EUR",
             "sort": "price",
-            "limit": params.get("limit", 200),
+            "limit": params.get("limit", 500),
             "adults": params.get("adults", 1),
             "selected_cabins": params.get("selected_cabins", "M"),
         }

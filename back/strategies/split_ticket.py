@@ -126,7 +126,7 @@ class SplitTicketStrategy(BaseStrategy):
                 "date_to": params["date_to"],
                 "curr": "EUR",
                 "sort": "price",
-                "limit": 5,
+                "limit": 50,
                 "adults": params.get("adults", 1),
                 "selected_cabins": params.get("selected_cabins", "M"),
             }
@@ -137,7 +137,7 @@ class SplitTicketStrategy(BaseStrategy):
                 "date_to": params["date_to"],
                 "curr": "EUR",
                 "sort": "price",
-                "limit": 5,
+                "limit": 50,
                 "adults": params.get("adults", 1),
                 "selected_cabins": params.get("selected_cabins", "M"),
             }

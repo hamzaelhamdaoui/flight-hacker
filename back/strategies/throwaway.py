@@ -11,14 +11,12 @@ class ThrowawayStrategy(BaseStrategy):
     name = "throwaway"
 
     async def search(self, params: dict[str, Any]) -> list[FlightResult]:
-        if params.get("flight_type") != "oneway":
-            return []
         if not params.get("fly_to"):
             return []
 
         client = get_kiwi_client()
 
-        # Get one-way price
+        # Get one-way price as baseline
         oneway_params: dict[str, Any] = {
             "fly_from": params["fly_from"],
             "fly_to": params["fly_to"],
@@ -26,7 +24,7 @@ class ThrowawayStrategy(BaseStrategy):
             "date_to": params["date_to"],
             "curr": "EUR",
             "sort": "price",
-            "limit": 5,
+            "limit": 50,
             "adults": params.get("adults", 1),
             "selected_cabins": params.get("selected_cabins", "M"),
         }
@@ -38,7 +36,7 @@ class ThrowawayStrategy(BaseStrategy):
         if oneway_price == 0:
             return []
 
-        # Search round-trip (throw away the return)
+        # Search round-trip (throw away the return) — cheaper RT than OW
         rt_params: dict[str, Any] = {
             "fly_from": params["fly_from"],
             "fly_to": params["fly_to"],
@@ -48,7 +46,7 @@ class ThrowawayStrategy(BaseStrategy):
             "nights_in_dst_to": 14,
             "curr": "EUR",
             "sort": "price",
-            "limit": 20,
+            "limit": 200,
             "adults": params.get("adults", 1),
             "selected_cabins": params.get("selected_cabins", "M"),
         }

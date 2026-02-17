@@ -100,7 +100,7 @@ class DoubleOpenJawStrategy(BaseStrategy):
                     },
                 ],
                 "curr": "EUR",
-                "limit": 5,
+                "limit": 50,
             }
             tasks.append(client.search_multi(body))
 

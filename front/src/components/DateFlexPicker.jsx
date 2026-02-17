@@ -28,6 +28,7 @@ export default function DateFlexPicker({ mode, onChange, values, onValuesChange 
       <div className="flex gap-1 p-1 bg-warm-100 rounded-xl mb-4 overflow-x-auto">
         {TABS.map(({ id, label, Icon }) => (
           <button
+            type="button"
             key={id}
             onClick={() => onChange(id)}
             className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-display font-medium transition ${

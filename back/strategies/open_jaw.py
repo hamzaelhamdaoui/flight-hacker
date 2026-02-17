@@ -85,7 +85,7 @@ class OpenJawStrategy(BaseStrategy):
                     },
                 ],
                 "curr": "EUR",
-                "limit": 10,
+                "limit": 100,
             }
             tasks.append(client.search_multi(body))
 
