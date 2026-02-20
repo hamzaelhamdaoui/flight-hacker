@@ -12,7 +12,7 @@ async function request(url, options = {}) {
   return res.json()
 }
 
-export async function searchFlights(params) {
+export async function searchFlights(params, onProgress) {
   // Start async job
   const job = await request('/api/search', {
     method: 'POST',
@@ -20,17 +20,21 @@ export async function searchFlights(params) {
   })
   if (!job.job_id) return job // direct response fallback
 
-  // Poll for results
+  // Poll for results with streaming progress
   const jobId = job.job_id
   const startTime = Date.now()
   const maxMs = 5 * 60 * 1000 // 5 min max
 
   while ((Date.now() - startTime) < maxMs) {
-    await new Promise(r => setTimeout(r, 3000))
+    await new Promise(r => setTimeout(r, 2000))
     let status
     try {
       status = await request(`/api/search/status/${jobId}`)
     } catch { continue }
+
+    if (status.status === 'running' && onProgress) {
+      onProgress(status)
+    }
     if (status.status === 'done') return status
     if (status.status === 'error') throw new Error(status.error || 'Search failed')
     if (status.status === 'not_found') throw new Error('Job expired or not found')

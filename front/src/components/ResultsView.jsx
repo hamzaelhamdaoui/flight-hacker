@@ -4,7 +4,7 @@ import { ArrowUpDown, Filter, Zap, X } from 'lucide-react'
 import FlightCard from './FlightCard'
 import StrategyBadge from './StrategyBadge'
 
-export default function ResultsView({ data, onClear }) {
+export default function ResultsView({ data, onClear, isStreaming }) {
   const [sortBy, setSortBy] = useState('price')
   const [filterStrategy, setFilterStrategy] = useState(null)
   const [filterStops, setFilterStops] = useState(null)
@@ -51,6 +51,9 @@ export default function ResultsView({ data, onClear }) {
         <span className="text-sm font-body text-warm-500">
           {strategies_used.length} strateg{strategies_used.length === 1 ? 'y' : 'ies'} used
         </span>
+        {isStreaming && (
+          <span className="text-sm text-coral-600 font-body animate-pulse">● Live — updating...</span>
+        )}
         <button
           onClick={onClear}
           className="ml-auto text-sm font-display font-medium text-warm-400 hover:text-warm-600 transition flex items-center gap-1"

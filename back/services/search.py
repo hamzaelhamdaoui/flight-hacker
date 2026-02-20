@@ -121,7 +121,7 @@ def _build_search_params(req: SearchRequest, origin_code: str, dest_code: str | 
     return params
 
 
-async def run_search(req: SearchRequest) -> dict[str, Any]:
+async def run_search(req: SearchRequest, job_store: dict | None = None, job_id: str | None = None) -> dict[str, Any]:
     # Validate & auto-fix nights
     if req.nights_min and req.nights_max and req.nights_min > req.nights_max:
         req.nights_min, req.nights_max = req.nights_max, req.nights_min
@@ -137,34 +137,52 @@ async def run_search(req: SearchRequest) -> dict[str, Any]:
     else:
         strategy_names = list(ALL_STRATEGIES)
     if not dest_code:
-        # Without destination, only everywhere makes sense
         strategy_names = ["everywhere"]
 
-    # Run all strategies in parallel
-    tasks = []
-    for name in strategy_names:
-        cls = STRATEGY_MAP.get(name)
-        if cls:
-            strategy = cls()
-            tasks.append((name, strategy.search(params)))
+    total_strategies = len(strategy_names)
 
-    raw_results = await asyncio.gather(
-        *[t[1] for t in tasks], return_exceptions=True
-    )
-
-    # Collect results, deduplicate
+    # Run strategies one by one for streaming progress
     all_results: list[FlightResult] = []
     seen_ids: set[str] = set()
     strategies_used: set[str] = set()
     standard_price: int | None = None
 
-    for i, res in enumerate(raw_results):
-        name = tasks[i][0]
-        if isinstance(res, Exception):
-            logger.error(f"Strategy {name} failed: {res}")
+    def _update_job(current_strategy: str, strategies_done: int):
+        if not job_store or not job_id:
+            return
+        # Build partial serializable results
+        partial = sorted(all_results, key=lambda r: r.price)
+        if req.max_price:
+            partial = [f for f in partial if f.price <= req.max_price]
+        job_store[job_id] = {
+            "status": "running",
+            "current_strategy": current_strategy,
+            "strategies_done": strategies_done,
+            "strategies_total": total_strategies,
+            "progress": max(1, int(strategies_done / total_strategies * 100)),
+            "results": partial,
+            "total": len(partial),
+            "cheapest": partial[0].price if partial else None,
+            "strategies_used": sorted(strategies_used),
+        }
+
+    for idx, name in enumerate(strategy_names):
+        cls = STRATEGY_MAP.get(name)
+        if not cls:
             continue
+
+        _update_job(name, idx)
+
+        strategy = cls()
+        try:
+            res = await strategy.search(params)
+        except Exception as e:
+            logger.error(f"Strategy {name} failed: {e}")
+            continue
+
         if not res:
             continue
+
         strategies_used.add(name)
         for flight in res:
             if flight.id and flight.id in seen_ids:
@@ -175,19 +193,19 @@ async def run_search(req: SearchRequest) -> dict[str, Any]:
                 standard_price = flight.price
             all_results.append(flight)
 
-    # Calculate savings vs standard for strategies that didn't already set it
+        _update_job(name, idx + 1)
+
+    # Calculate savings vs standard
     if standard_price:
         for flight in all_results:
             if flight.savings_pct is None and flight.strategy != "standard" and flight.price < standard_price:
                 flight.savings_pct = round((1 - flight.price / standard_price) * 100, 1)
                 flight.savings_vs = standard_price
 
-    # Post-filter by max_price (some strategies build their own params and skip it)
     if req.max_price:
         all_results = [f for f in all_results if f.price <= req.max_price]
 
     all_results.sort(key=lambda r: r.price)
-
     cheapest = all_results[0].price if all_results else None
 
     return {

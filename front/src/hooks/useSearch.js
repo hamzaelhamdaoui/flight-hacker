@@ -8,6 +8,7 @@ export function useSearch() {
   const [mode, setMode] = useState(null) // 'search' or 'explore'
   const [progress, setProgress] = useState(0)
   const [searchStatus, setSearchStatus] = useState('')
+  const [currentStrategy, setCurrentStrategy] = useState('')
 
   const search = useCallback(async (params) => {
     const isExplore = params._mode === 'explore'
@@ -20,6 +21,7 @@ export function useSearch() {
     setResults(null)
     setProgress(0)
     setSearchStatus('')
+    setCurrentStrategy('')
 
     try {
       if (isExplore) {
@@ -41,8 +43,24 @@ export function useSearch() {
         setResults(data)
         setProgress(100)
       } else {
-        const data = await searchFlights(cleanParams)
+        // Search mode — streaming with strategy progress
+        const data = await searchFlights(cleanParams, (status) => {
+          const { current_strategy, strategies_done, strategies_total, progress: prog, results: partialResults, total, cheapest, strategies_used } = status
+          setProgress(prog || 0)
+          setCurrentStrategy(current_strategy || '')
+          setSearchStatus(`${strategies_done}/${strategies_total} strategies${current_strategy ? ` — running ${current_strategy}...` : ''}`)
+          if (partialResults && partialResults.length > 0) {
+            setResults({
+              results: partialResults,
+              total,
+              cheapest,
+              strategies_used: strategies_used || [],
+            })
+          }
+        })
         setResults(data)
+        setProgress(100)
+        setCurrentStrategy('')
       }
     } catch (err) {
       setError(err.message || 'Search failed')
@@ -57,12 +75,12 @@ export function useSearch() {
     setMode(null)
     setProgress(0)
     setSearchStatus('')
+    setCurrentStrategy('')
   }, [])
 
-  return { results, loading, error, search, clearResults, mode, progress, searchStatus }
+  return { results, loading, error, search, clearResults, mode, progress, searchStatus, currentStrategy }
 }
 
-// Keep for backward compat if needed
 export function useExplore() {
   const { results, loading, error, search, clearResults, progress, searchStatus } = useSearch()
   const explore = useCallback((params) => search({ ...params, _mode: 'explore' }), [search])

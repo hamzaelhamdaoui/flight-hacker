@@ -51,7 +51,7 @@ _search_jobs: dict[str, dict[str, Any]] = {}
 
 async def _run_search_job(job_id: str, req: SearchRequest) -> None:
     try:
-        result = await run_search(req)
+        result = await run_search(req, job_store=_search_jobs, job_id=job_id)
         _search_jobs[job_id] = {"status": "done", "result": result}
     except Exception as e:
         _search_jobs[job_id] = {"status": "error", "error": str(e)}
@@ -78,7 +78,18 @@ async def search_status(job_id: str) -> dict[str, Any]:
         err = job.get("error", "Unknown error")
         del _search_jobs[job_id]
         return {"status": "error", "error": err}
-    return {"status": "running"}
+    # Running — return partial results
+    return {
+        "status": "running",
+        "current_strategy": job.get("current_strategy", ""),
+        "strategies_done": job.get("strategies_done", 0),
+        "strategies_total": job.get("strategies_total", 0),
+        "progress": job.get("progress", 0),
+        "results": job.get("results", []),
+        "total": job.get("total", 0),
+        "cheapest": job.get("cheapest"),
+        "strategies_used": job.get("strategies_used", []),
+    }
 
 
 async def _run_explore_job(job_id: str, kwargs: dict[str, Any]) -> None:
