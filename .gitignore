@@ -8,3 +8,6 @@ dist/
 back/.env
 front/.env*
 __pycache__/
+test_logs/
+*.pyc
+__pycache__/

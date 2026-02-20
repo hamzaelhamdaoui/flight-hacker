@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from api.schemas import FlightResult
@@ -11,192 +11,213 @@ from strategies.base import BaseStrategy
 
 logger = logging.getLogger("split_ticket")
 
-FALLBACK_HUBS = ["IST", "DXB", "FRA", "AMS", "LHR"]
+# Major connection hubs reachable cheaply from Spain
+HUBS = ["IST", "DXB", "DOH", "FRA", "AMS", "LHR", "CDG", "MUC", "ZRH", "HEL", "WAW", "VIE"]
 
-MIN_CONNECTION_HOURS = 3
-MAX_CONNECTION_HOURS = 12
+FMT = "%d/%m/%Y"
 
 
-def _parse_local_time(dt_str: str) -> datetime | None:
-    if not dt_str:
-        return None
+def _parse_dt(s: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
     except (ValueError, TypeError):
         return None
 
 
-def _find_valid_combos(
-    leg1_items: list[dict],
-    leg2_items: list[dict],
-    min_hours: float = MIN_CONNECTION_HOURS,
-    max_hours: float = MAX_CONNECTION_HOURS,
-) -> list[tuple[dict, dict]]:
-    """Find leg1/leg2 combos where leg2 departs 3-12h after leg1 arrives."""
-    combos = []
-    for l1 in leg1_items:
-        l1_arrival = _parse_local_time(l1.get("local_arrival", ""))
-        if not l1_arrival:
-            continue
-        for l2 in leg2_items:
-            l2_departure = _parse_local_time(l2.get("local_departure", ""))
-            if not l2_departure:
-                continue
-            gap = (l2_departure - l1_arrival).total_seconds() / 3600
-            if min_hours <= gap <= max_hours:
-                combos.append((l1, l2))
-    return combos
-
-
 class SplitTicketStrategy(BaseStrategy):
     name = "split_ticket"
-
-    async def _get_hubs(self, origin: str, destination: str) -> list[str]:
-        """Get dynamic hubs from top destinations, merged with fallback mega-hubs."""
-        client = get_kiwi_client()
-        try:
-            top_dests = await client.locations_topdestinations(origin, limit=15)
-            dynamic_hubs = [
-                d.get("code", "") for d in top_dests
-                if d.get("code") and d.get("code") not in (origin, destination)
-            ]
-        except Exception:
-            dynamic_hubs = []
-
-        # Merge with fallback hubs, preserving order (dynamic first)
-        seen: set[str] = set()
-        hubs: list[str] = []
-        for h in dynamic_hubs + FALLBACK_HUBS:
-            if h and h not in seen and h not in (origin, destination):
-                seen.add(h)
-                hubs.append(h)
-        return hubs[:12]
 
     async def search(self, params: dict[str, Any]) -> list[FlightResult]:
         if not params.get("fly_to"):
             return []
 
         client = get_kiwi_client()
+        origin = params["fly_from"]
+        destination = params["fly_to"]
+        budget = params.get("max_price")
+        nights_from = params.get("nights_in_dst_from", 6)
+        nights_to = params.get("nights_in_dst_to", 17)
 
-        # Get direct price
-        direct_params: dict[str, Any] = {
-            "fly_from": params["fly_from"],
-            "fly_to": params["fly_to"],
-            "date_from": params["date_from"],
-            "date_to": params["date_to"],
-            "curr": "EUR",
-            "sort": "price",
-            "limit": 1,
-            "adults": params.get("adults", 1),
-            "selected_cabins": params.get("selected_cabins", "M"),
-        }
-        if params.get("flight_type") != "oneway":
-            if params.get("return_from"):
-                direct_params["return_from"] = params["return_from"]
-            if params.get("return_to"):
-                direct_params["return_to"] = params["return_to"]
-            if params.get("nights_in_dst_from") is not None:
-                direct_params["nights_in_dst_from"] = params["nights_in_dst_from"]
-                direct_params["nights_in_dst_to"] = params.get("nights_in_dst_to", params["nights_in_dst_from"])
+        hubs = [h for h in HUBS if h.upper() not in (origin.upper(), destination.upper())]
 
-        direct_data = await client.search(direct_params)
-        direct_results = direct_data.get("data", [])
-        if not direct_results:
-            return []
-        direct_price = direct_results[0].get("price", 0)
-        if direct_price == 0:
-            return []
+        # Step 1: Search MAD↔hub round-trips (these define the travel window)
+        # nights_in_dst = total trip length (time spent away from home, at/via hub)
+        # Batch in groups of 3 to avoid 429s
+        rt1_all = []
+        rt1_hubs = []
+        for i in range(0, len(hubs), 3):
+            batch = hubs[i:i + 3]
+            coros = []
+            for hub in batch:
+                rt1_params: dict[str, Any] = {
+                    "fly_from": origin,
+                    "fly_to": hub,
+                    "date_from": params["date_from"],
+                    "date_to": params["date_to"],
+                    "curr": "EUR",
+                    "sort": "price",
+                    "limit": 5,
+                    "adults": params.get("adults", 1),
+                    "selected_cabins": params.get("selected_cabins", "M"),
+                    "nights_in_dst_from": str(nights_from),
+                    "nights_in_dst_to": str(nights_to),
+                }
+                if budget:
+                    rt1_params["price_to"] = int(budget * 0.5)
+                coros.append(client.search(rt1_params))
+                rt1_hubs.append(hub)
+            batch_results = await asyncio.gather(*coros, return_exceptions=True)
+            rt1_all.extend(batch_results)
+            await asyncio.sleep(2)
 
-        # Get dynamic hubs
-        hub_list = await self._get_hubs(params["fly_from"], params["fly_to"])
-        if not hub_list:
-            return []
-
-        # Build all coroutines first, then gather them all at once
-        hub_coros: list[tuple[str, Any, Any]] = []
-        leg1_coros = []
-        leg2_coros = []
-        hub_names = []
-
-        for hub in hub_list:
-            leg1_params: dict[str, Any] = {
-                "fly_from": params["fly_from"],
-                "fly_to": hub,
-                "date_from": params["date_from"],
-                "date_to": params["date_to"],
-                "curr": "EUR",
-                "sort": "price",
-                "limit": 50,
-                "adults": params.get("adults", 1),
-                "selected_cabins": params.get("selected_cabins", "M"),
-            }
-            leg2_params: dict[str, Any] = {
-                "fly_from": hub,
-                "fly_to": params["fly_to"],
-                "date_from": params["date_from"],
-                "date_to": params["date_to"],
-                "curr": "EUR",
-                "sort": "price",
-                "limit": 50,
-                "adults": params.get("adults", 1),
-                "selected_cabins": params.get("selected_cabins", "M"),
-            }
-            hub_names.append(hub)
-            leg1_coros.append(client.search(leg1_params))
-            leg2_coros.append(client.search(leg2_params))
-
-        # Gather ALL searches at once (truly parallel)
-        all_coros = leg1_coros + leg2_coros
-        all_results = await asyncio.gather(*all_coros, return_exceptions=True)
-
-        n = len(hub_names)
-        leg1_results = all_results[:n]
-        leg2_results = all_results[n:]
-
+        # Step 2: For each hub with results, extract travel windows and search hub↔dest
         results: list[FlightResult] = []
+        seen: set[str] = set()
 
-        for i, hub in enumerate(hub_names):
-            l1_data = leg1_results[i]
-            l2_data = leg2_results[i]
-            if isinstance(l1_data, Exception) or isinstance(l2_data, Exception):
+        for idx, hub in enumerate(rt1_hubs):
+            rt1_data = rt1_all[idx]
+            if isinstance(rt1_data, Exception):
                 continue
-            leg1_items = l1_data.get("data", [])
-            leg2_items = l2_data.get("data", [])
-            if not leg1_items or not leg2_items:
-                continue
-
-            # Find time-valid combinations
-            valid_combos = _find_valid_combos(leg1_items, leg2_items)
-            if not valid_combos:
+            rt1_items = rt1_data.get("data", [])
+            if not rt1_items:
                 continue
 
-            for l1, l2 in valid_combos:
-                combined = l1.get("price", 0) + l2.get("price", 0)
-                threshold = direct_price * 0.9  # Must be at least 10% cheaper
-                if combined >= threshold:
+            # For each MAD↔hub itinerary, find the outbound arrival and return departure
+            # to define the window for hub↔dest booking
+            rt2_coros = []
+            rt1_refs = []  # keep reference to which rt1 item each rt2 corresponds to
+
+            for r1 in rt1_items[:3]:
+                r1_price = r1.get("price", 0)
+                if not r1_price:
+                    continue
+                if budget and r1_price > budget * 0.4:
                     continue
 
-                l1_arrival = l1.get("local_arrival", "")
-                l2_departure = l2.get("local_departure", "")
-                l1_airline = l1.get("airlines", [""])[0] if l1.get("airlines") else ""
-                l2_airline = l2.get("airlines", [""])[0] if l2.get("airlines") else ""
+                route = r1.get("route", [])
+                if not route:
+                    continue
 
-                flight = self.parse_flight(l1, strategy="split_ticket")
-                flight.price = combined
-                savings = round((1 - combined / direct_price) * 100, 1)
-                flight.savings_pct = savings
-                flight.savings_vs = direct_price
-                flight.strategy_explanation = (
-                    f"Split via {hub}: "
-                    f"Leg 1: {params['fly_from']}→{hub} ({l1_airline}, "
-                    f"arrives {l1_arrival[:16]}, €{l1.get('price', 0)}) | "
-                    f"Leg 2: {hub}→{params['fly_to']} ({l2_airline}, "
-                    f"departs {l2_departure[:16]}, €{l2.get('price', 0)}) = €{combined}. "
-                    f"Direct is €{direct_price}. Save {savings}%"
-                )
-                results.append(flight)
+                # Find when we arrive at hub (last outbound segment arrival)
+                outbound_segs = [s for s in route if s.get("return", 0) == 0]
+                return_segs = [s for s in route if s.get("return", 0) == 1]
+
+                if not outbound_segs or not return_segs:
+                    continue
+
+                arrive_hub = _parse_dt(outbound_segs[-1].get("local_arrival", ""))
+                depart_hub_home = _parse_dt(return_segs[0].get("local_departure", ""))
+
+                if not arrive_hub or not depart_hub_home:
+                    continue
+
+                # Hub↔dest booking window:
+                # Depart hub: day after arriving (give 1 day buffer)
+                # Return to hub: day before returning home
+                hub_depart_earliest = (arrive_hub + timedelta(hours=12)).strftime(FMT)
+                hub_return_latest = (depart_hub_home - timedelta(hours=12)).strftime(FMT)
+
+                # Calculate available nights at destination
+                available_days = (depart_hub_home - arrive_hub).days - 1
+                if available_days < 3:
+                    continue  # Not enough time for a meaningful trip
+
+                dest_nights_min = max(3, available_days - 2)  # leave some buffer
+                dest_nights_max = available_days
+
+                rt2_params: dict[str, Any] = {
+                    "fly_from": hub,
+                    "fly_to": destination,
+                    "date_from": hub_depart_earliest,
+                    "date_to": hub_depart_earliest,  # Pin to first available day
+                    "curr": "EUR",
+                    "sort": "price",
+                    "limit": 5,
+                    "adults": params.get("adults", 1),
+                    "selected_cabins": params.get("selected_cabins", "M"),
+                    "nights_in_dst_from": str(dest_nights_min),
+                    "nights_in_dst_to": str(dest_nights_max),
+                }
+                remaining = budget - r1_price if budget else None
+                if remaining:
+                    rt2_params["price_to"] = remaining
+
+                rt2_coros.append(client.search(rt2_params))
+                rt1_refs.append(r1)
+
+            if not rt2_coros:
+                continue
+
+            # Run rt2 searches sequentially to avoid 429s
+            rt2_all = []
+            for coro in rt2_coros:
+                try:
+                    res = await coro
+                    rt2_all.append(res)
+                except Exception as e:
+                    rt2_all.append(e)
+                await asyncio.sleep(1)
+
+            for j, rt2_data in enumerate(rt2_all):
+                if isinstance(rt2_data, Exception):
+                    continue
+                rt2_items = rt2_data.get("data", [])
+                if not rt2_items:
+                    continue
+
+                r1 = rt1_refs[j]
+                r1_price = r1.get("price", 0)
+                r1_link = r1.get("deep_link", "")
+
+                for r2 in rt2_items[:3]:
+                    r2_price = r2.get("price", 0)
+                    if not r2_price:
+                        continue
+
+                    combined = r1_price + r2_price
+                    if budget and combined > budget:
+                        continue
+
+                    key = f"{hub}_{r1_price}_{r2_price}_{r2.get('id','')}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    r2_link = r2.get("deep_link", "")
+
+                    flight = self.parse_flight(r2, strategy="split_ticket")
+                    flight.price = combined
+                    flight.fly_from = origin
+                    flight.city_from = r1.get("cityFrom", origin)
+                    flight.city_code_from = r1.get("cityCodeFrom", origin)
+                    flight.country_from = r1.get("countryFrom", {})
+
+                    # Both deep links
+                    flight.deep_link = f"{r1_link}|{r2_link}"
+
+                    # Get actual dates for explanation
+                    r1_dep = r1.get("local_departure", "")[:10]
+                    r1_ret = ""
+                    r1_return_segs = [s for s in r1.get("route", []) if s.get("return", 0) == 1]
+                    if r1_return_segs:
+                        r1_ret = r1_return_segs[-1].get("local_arrival", "")[:10]
+
+                    r2_dep = r2.get("local_departure", "")[:10]
+                    r2_ret = ""
+                    r2_return_segs = [s for s in r2.get("route", []) if s.get("return", 0) == 1]
+                    if r2_return_segs:
+                        r2_ret = r2_return_segs[-1].get("local_arrival", "")[:10]
+
+                    flight.strategy_explanation = (
+                        f"2 bookings via {hub}: "
+                        f"① {origin}↔{hub} €{r1_price} ({r1_dep}→{r1_ret}) + "
+                        f"② {hub}↔{destination} €{r2_price} ({r2_dep}→{r2_ret}) = €{combined}"
+                    )
+                    results.append(flight)
+
+            logger.info(f"Split via {hub}: {len(rt1_items)} windows, {sum(1 for r in rt2_all if not isinstance(r, Exception))} rt2 searches")
+            await asyncio.sleep(1)
 
         results.sort(key=lambda r: r.price)
-        # TODO (v1.5): For round-trip, also split the return leg via the same hub
-        # (dest→hub + hub→origin) and compare total split round-trip vs direct.
-        return results[:10]
+        logger.info(f"Split ticket total: {len(results)} valid combos for {origin}→{destination}")
+        return results[:20]

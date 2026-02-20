@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from api.schemas import FlightResult, SearchRequest
@@ -129,8 +131,11 @@ async def run_search(req: SearchRequest) -> dict[str, Any]:
 
     params = _build_search_params(req, origin_code, dest_code)
 
-    # ALL strategies run by default — no filtering
-    strategy_names = list(ALL_STRATEGIES)
+    # Use requested strategies, or defaults
+    if req.strategies:
+        strategy_names = [s for s in req.strategies if s in ALL_STRATEGIES]
+    else:
+        strategy_names = list(ALL_STRATEGIES)
     if not dest_code:
         # Without destination, only everywhere makes sense
         strategy_names = ["everywhere"]
@@ -397,7 +402,7 @@ async def _explore_continent(
     return list(city_best.values())
 
 
-async def run_explore(
+async def run_explore_legacy(
     origin: str,
     budget: int,
     date_from: str | None = None,
@@ -621,4 +626,416 @@ async def run_explore(
         "results": explore_results,
         "total": len(explore_results),
         "origin": origin_code,
+    }
+
+
+# Master destination list organized by continent
+DESTINATIONS = {
+    "europe": [
+        "ROM", "PAR", "LON", "BCN", "AMS", "BER", "PRG", "VIE", "BUD", "WAW", 
+        "ATH", "LIS", "DUB", "CPH", "OSL", "HEL", "IST", "ZAG", "BEG", "TIA",
+        "SKP", "BUH", "SOF", "RIX", "VNO", "TLL", "MSQ", "KIV", "FRA", "MUC",
+        "ZUR", "GVA", "MIL", "VCE", "NAP", "FCO", "MAD", "SVQ", "BIO", "VLC",
+        "OPO", "STR", "LYS", "MRS", "NCE", "TLS", "BRU", "ANR", "RTM", "EDI",
+        "MAN", "LIV", "BFS", "GOT", "STO", "BGO", "TRD", "REK", "KEF"
+    ],
+    "africa": [
+        "CMN", "RAK", "TNG", "FEZ", "TUN", "CAI", "ALG", "CPT", "JNB", "DUR",
+        "NBO", "DAR", "ADD", "LOS", "ABV", "ACC", "DKR", "BJL", "FNA", "CKY",
+        "ABJ", "COO", "LBV", "MPM", "WDH", "GBE", "ASM", "TNR", "MRU", "RUN"
+    ],
+    "asia": [
+        "BKK", "SGN", "HAN", "TYO", "NRT", "KIX", "ICN", "PUS", "DEL",
+        "BOM", "BLR", "MAA", "DPS", "CGK", "KUL", "SIN", "MNL", "CMB",
+        "TLV", "TBS", "EVN", "AMM", "DOH", "DXB", "AUH", "KWI", "BAH",
+        "RUH", "JED", "MCT", "IKA", "ESB", "ALA", "TSE", "FRU", "TAS", "HKT",
+        "VTE", "PNH", "RGN", "DAD", "CXR",
+        "PEK", "PVG", "HKG", "TPE", "KTM", "REP", "CEB", "GMP",
+    ],
+    "americas": [
+        "NYC", "JFK", "LGA", "EWR", "LAX", "SFO", "CHI", "ORD", "MIA", "DFW",
+        "ATL", "BOS", "SEA", "DEN", "LAS", "PHX", "YYZ", "YVR", "YUL", "MEX",
+        "CUN", "GDL", "BOG", "MDE", "LIM", "CUZ", "SCL", "EZE", "GRU", "RIO",
+        "CGH", "BSB", "FOR", "SSA", "POA", "CWB", "MAO", "BEL", "HAV", "VRA",
+        "SJO", "PTY", "SDQ", "PUJ", "UIO", "LPB", "ASU", "MVD", "CCS", "GEO"
+    ],
+    "oceania": [
+        "SYD", "MEL", "BNE", "PER", "ADL", "DRW", "AKL", "WLG", "CHC", "ZQN", 
+        "NAN", "SUV", "PPT", "NOU", "POM", "HNL", "GUM", "APW"
+    ]
+}
+
+# Default strategies for explore
+DEFAULT_EXPLORE_STRATEGIES = ["standard", "nearby_airport", "mixed_carrier", "day_arbitrage", "positioning", "open_jaw"]
+
+
+async def run_explore(
+    origin: str,
+    budget: int,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    nights_min: int = 2,
+    nights_max: int = 7,
+    flight_type: str = "round",
+    continent: str | None = None,
+    max_duration: float | None = None,
+    direct_only: bool = False,
+    sort_by: str = "price",
+    strategies: list[str] | None = None,
+    months: list[str] | None = None,
+    job_store: dict[str, Any] | None = None,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """New hybrid city-by-city explore with strategy selector."""
+    from clients.kiwi import get_kiwi_client
+    from services.locations import resolve_location
+
+    # Use default strategies if none provided
+    if not strategies:
+        strategies = DEFAULT_EXPLORE_STRATEGIES.copy()
+    
+    # Filter out strategies that don't make sense for explore
+    valid_strategies = [s for s in strategies if s in STRATEGY_MAP and s != "everywhere"]
+    if not valid_strategies:
+        valid_strategies = ["standard"]
+    
+    origin_code = await resolve_location(origin)
+    today = date.today()
+    client = get_kiwi_client()
+    origin_upper = origin_code.upper()
+
+    # Build monthly date ranges from user selection (or default next 3 months)
+    month_ranges: list[tuple[str, str]] = []
+    earliest = today + timedelta(days=1)  # at least tomorrow
+
+    if months:
+        # User selected specific months like ["2026-03", "2026-07"]
+        for m_str in sorted(months):
+            try:
+                year, month_num = int(m_str[:4]), int(m_str[5:7])
+                m_start = date(year, month_num, 1)
+                if m_start < earliest:
+                    m_start = earliest  # don't search in the past
+                if month_num == 12:
+                    m_end = date(year + 1, 1, 1) - timedelta(days=1)
+                else:
+                    m_end = date(year, month_num + 1, 1) - timedelta(days=1)
+                if m_start <= m_end:
+                    month_ranges.append((_format_date(m_start), _format_date(m_end)))
+            except (ValueError, IndexError):
+                continue
+    else:
+        # Default: next 3 months
+        cursor = earliest
+        for _ in range(3):
+            m_start = cursor.replace(day=1)
+            if m_start < cursor:
+                m_start = cursor
+            if m_start.month == 12:
+                m_end = m_start.replace(year=m_start.year + 1, month=1, day=1) - timedelta(days=1)
+            else:
+                m_end = m_start.replace(month=m_start.month + 1, day=1) - timedelta(days=1)
+            month_ranges.append((_format_date(m_start), _format_date(m_end)))
+            if m_start.month == 12:
+                cursor = m_start.replace(year=m_start.year + 1, month=1, day=1)
+            else:
+                cursor = m_start.replace(month=m_start.month + 1, day=1)
+    
+    if not month_ranges:
+        return {"results": [], "total": 0, "origin": origin_code}
+
+    # Base search parameters (date ranges added per-month)
+    base_params = {
+        "curr": "EUR",
+        "adults": 1,
+        "selected_cabins": "M",
+        "flight_type": flight_type,
+        "nights_in_dst_from": nights_min,
+        "nights_in_dst_to": nights_max,
+        "max_price": budget if budget else None,
+    }
+
+    # Get destination list
+    if continent and continent in DESTINATIONS:
+        dest_cities = DESTINATIONS[continent]
+    else:
+        dest_cities = []
+        for cont_cities in DESTINATIONS.values():
+            dest_cities.extend(cont_cities)
+    
+    if not dest_cities:
+        return {"results": [], "total": 0, "origin": origin_code}
+
+    # City-by-city scan, month-by-month, with selected strategies
+    all_results = []
+    destinations_searched = 0
+    total_destinations = len(dest_cities)
+    
+    # ── Test logging ──
+    import time as _time
+    _test_log_start = _time.time()
+    _test_log_id = f"{origin_code}_{continent or 'all'}_{','.join(valid_strategies)}_{int(_test_log_start)}"
+
+    logger.info(f"Starting explore: {total_destinations} destinations × {len(month_ranges)} months × {len(valid_strategies)} strategies")
+
+    for i, dest_city in enumerate(dest_cities):
+        destinations_searched += 1
+        
+        # Update progress in job store if provided
+        if job_store and job_id:
+            progress = max(1, int((destinations_searched / total_destinations) * 100))
+            # Build aggregated partial results for streaming
+            _partial_routes: dict[str, dict] = {}
+            for _r in all_results:
+                _ff = (_r.get("fly_from") or "").upper()
+                _cc = (_r.get("city_code") or _r.get("city") or "").upper()
+                _rk = f"{_ff}→{_cc}"
+                if _rk not in _partial_routes:
+                    _partial_routes[_rk] = {
+                        "city": _r["city"], "city_code": _r.get("city_code", ""),
+                        "country": _r.get("country", ""), "country_code": _r.get("country_code", ""),
+                        "fly_from": _r.get("fly_from", ""), "continent": _r.get("continent", ""),
+                        "distance_km": _r.get("distance_km", 0), "price": _r["price"],
+                        "is_direct": _r.get("is_direct", False),
+                        "best_strategy": _r.get("best_strategy", "standard"),
+                        "flight_duration_hours": _r.get("flight_duration_hours", 0),
+                        "airlines": _r.get("airlines", []),
+                        "dates": [{"local_departure": _r.get("local_departure", ""), "price": _r["price"],
+                                   "nights_in_dest": _r.get("nights_in_dest", 0), "deep_link": _r.get("deep_link", ""),
+                                   "best_strategy": _r.get("best_strategy", "standard")}],
+                    }
+                else:
+                    _d = _partial_routes[_rk]["dates"]
+                    if len(_d) < 15:
+                        _d.append({"local_departure": _r.get("local_departure", ""), "price": _r["price"],
+                                   "nights_in_dest": _r.get("nights_in_dest", 0), "deep_link": _r.get("deep_link", ""),
+                                   "best_strategy": _r.get("best_strategy", "standard")})
+                    elif _r["price"] < max(x["price"] for x in _d):
+                        _mi = max(range(len(_d)), key=lambda j: _d[j]["price"])
+                        _d[_mi] = {"local_departure": _r.get("local_departure", ""), "price": _r["price"],
+                                   "nights_in_dest": _r.get("nights_in_dest", 0), "deep_link": _r.get("deep_link", ""),
+                                   "best_strategy": _r.get("best_strategy", "standard")}
+                    if _r["price"] < _partial_routes[_rk]["price"]:
+                        _partial_routes[_rk]["price"] = _r["price"]
+            for _pr in _partial_routes.values():
+                _pr["dates"].sort(key=lambda d: d["price"])
+            _partial_list = sorted(_partial_routes.values(), key=lambda r: r["price"])[:250]
+            job_store[job_id] = {
+                "status": "running",
+                "progress": progress,
+                "destinations_searched": destinations_searched,
+                "destinations_total": total_destinations,
+                "current_destination": dest_city if isinstance(dest_city, str) else dest_city.get("city", ""),
+                "results": _partial_list,
+                "total": len(_partial_list)
+            }
+
+        # Search this destination month-by-month with each selected strategy
+        for m_idx, (m_from, m_to) in enumerate(month_ranges):
+            for strategy_name in valid_strategies:
+                if strategy_name not in STRATEGY_MAP:
+                    continue
+                    
+                try:
+                    strategy_class = STRATEGY_MAP[strategy_name]
+                    strategy = strategy_class()
+                    
+                    # Build params for this strategy with monthly date range
+                    strategy_params = {
+                        **base_params,
+                        "fly_from": origin_code,
+                        "fly_to": dest_city,
+                        "date_from": m_from,
+                        "date_to": m_to,
+                    }
+                    
+                    # Call the strategy
+                    strategy_results = await strategy.search(strategy_params)
+                    
+                    # Convert FlightResult objects to explore result dicts
+                    logger.info(f"[explore] {strategy_name} returned {len(strategy_results)} results for {dest_city}, budget={budget}")
+                    filtered_price = 0
+                    filtered_origin = 0
+                    for flight in strategy_results:
+                        if flight.price > budget:
+                            filtered_price += 1
+                            continue
+                            
+                        # Verify this goes back to origin for round-trip
+                        # Skip check for strategies that build combined one-way legs
+                        skip_origin_check = strategy_name in ("split_ticket", "open_jaw", "double_open_jaw", "positioning")
+                        if flight_type == "round" and not skip_origin_check:
+                            route = flight.route or []
+                            if route:
+                                last_seg = route[-1]
+                                ret_city = getattr(last_seg, 'city_code_to', '').upper()
+                                ret_airport = getattr(last_seg, 'fly_to', '').upper()
+                                if ret_city != origin_upper and ret_airport != origin_upper:
+                                    filtered_origin += 1
+                                    continue
+                        
+                        result = {
+                            "city": flight.city_to,
+                            "city_code": flight.city_code_to,
+                            "country": flight.country_to.get("name", "") if flight.country_to else "",
+                            "country_code": flight.country_to.get("code", "") if flight.country_to else "",
+                            "price": flight.price,
+                            "local_departure": flight.local_departure,
+                            "local_arrival": flight.local_arrival,
+                            "deep_link": flight.deep_link,
+                            "fly_from": flight.fly_from,
+                            "fly_to": flight.fly_to,
+                            "nights_in_dest": flight.nights_in_dest,
+                            "airlines": flight.airlines,
+                            "continent": get_continent(flight.country_to.get("code", "") if flight.country_to else ""),
+                            "distance_km": round(flight.distance),
+                            "flight_duration_hours": round(flight.duration.get("departure", 0) / 3600, 1) if isinstance(flight.duration, dict) else 0,
+                            "is_direct": len([r for r in (flight.route or []) if getattr(r, 'return_leg', 0) == 0]) <= 1,
+                            "best_strategy": strategy_name,
+                            "savings_pct": flight.savings_pct or 0,
+                            "virtual_interlining": flight.virtual_interlining,
+                        }
+                        all_results.append(result)
+                    
+                    if filtered_price or filtered_origin:
+                        logger.info(f"[explore] {strategy_name} {dest_city}: filtered {filtered_price} by price, {filtered_origin} by origin")
+                        
+                except Exception as e:
+                    logger.warning(f"Strategy {strategy_name} failed for {dest_city} month {m_from}: {e}")
+                    continue
+                
+                # Rate limiting: 3 seconds between API calls
+                await asyncio.sleep(3)
+
+    logger.info(f"[explore] Total all_results before aggregation: {len(all_results)}")
+    # ── Aggregate by route (fly_from→city_code), keep top 5 cheapest date combos ──
+    MAX_CARDS = 250
+    MAX_DATES_PER_ROUTE = 15
+
+    route_map: dict[str, dict[str, Any]] = {}  # key = "FLY_FROM→CITY_CODE"
+
+    for result in all_results:
+        fly_from = (result.get("fly_from") or "").upper()
+        city_code = (result.get("city_code") or result.get("city") or "").upper()
+        if not fly_from or not city_code:
+            continue
+
+        # Apply filters early
+        if max_duration and result["flight_duration_hours"] > max_duration:
+            continue
+        if direct_only and not result["is_direct"]:
+            continue
+
+        route_key = f"{fly_from}→{city_code}"
+        date_entry = {
+            "local_departure": result.get("local_departure", ""),
+            "local_arrival": result.get("local_arrival", ""),
+            "price": result["price"],
+            "nights_in_dest": result.get("nights_in_dest", 0),
+            "deep_link": result.get("deep_link", ""),
+            "airlines": result.get("airlines", []),
+            "is_direct": result.get("is_direct", False),
+            "best_strategy": result.get("best_strategy", "standard"),
+            "flight_duration_hours": result.get("flight_duration_hours", 0),
+        }
+
+        if route_key not in route_map:
+            route_map[route_key] = {
+                "city": result["city"],
+                "city_code": result.get("city_code", ""),
+                "country": result.get("country", ""),
+                "country_code": result.get("country_code", ""),
+                "fly_from": result.get("fly_from", ""),
+                "continent": result.get("continent", ""),
+                "distance_km": result.get("distance_km", 0),
+                "virtual_interlining": result.get("virtual_interlining", False),
+                "dates": [date_entry],
+            }
+        else:
+            dates = route_map[route_key]["dates"]
+            # Deduplicate by departure date string (keep cheapest per date)
+            dep_date = (result.get("local_departure") or "")[:10]
+            existing_dates = {(d.get("local_departure") or "")[:10] for d in dates}
+            if dep_date in existing_dates:
+                # Replace if cheaper
+                for j, d in enumerate(dates):
+                    if (d.get("local_departure") or "")[:10] == dep_date and result["price"] < d["price"]:
+                        dates[j] = date_entry
+                        break
+            elif len(dates) < MAX_DATES_PER_ROUTE:
+                dates.append(date_entry)
+            else:
+                # Replace the most expensive if this is cheaper
+                max_idx = max(range(len(dates)), key=lambda j: dates[j]["price"])
+                if result["price"] < dates[max_idx]["price"]:
+                    dates[max_idx] = date_entry
+
+    # Build final cards sorted by cheapest price
+    final_results = []
+    for route_key, card in route_map.items():
+        card["dates"].sort(key=lambda d: d["price"])
+        card["price"] = card["dates"][0]["price"]  # headline price = cheapest
+        card["best_strategy"] = card["dates"][0].get("best_strategy", "standard")
+        card["is_direct"] = any(d["is_direct"] for d in card["dates"])
+        card["airlines"] = card["dates"][0].get("airlines", [])
+        card["flight_duration_hours"] = card["dates"][0].get("flight_duration_hours", 0)
+        card["savings_pct"] = 0
+        final_results.append(card)
+
+    # Sort all cards
+    sort_keys = {
+        "price": lambda r: r["price"],
+        "distance": lambda r: r["distance_km"],
+        "duration": lambda r: r["flight_duration_hours"],
+        "destination": lambda r: r["city"].lower(),
+    }
+    final_results.sort(key=sort_keys.get(sort_by, sort_keys["price"]))
+
+    # Cap at MAX_CARDS
+    final_results = final_results[:MAX_CARDS]
+
+    # ── Save test log (toggle: enabled) ──
+    try:
+        _test_log_dir = Path(__file__).parent.parent / "test_logs"
+        _test_log_dir.mkdir(exist_ok=True)
+        _elapsed = round(_time.time() - _test_log_start, 1)
+        _log_entry = {
+            "id": _test_log_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "params": {
+                "origin": origin_code,
+                "budget": budget,
+                "nights_min": nights_min,
+                "nights_max": nights_max,
+                "continent": continent,
+                "months": [f"{mr[0]}-{mr[1]}" for mr in month_ranges],
+                "strategies": valid_strategies,
+                "flight_type": flight_type,
+                "max_duration": max_duration,
+                "direct_only": direct_only,
+            },
+            "stats": {
+                "destinations_searched": destinations_searched,
+                "destinations_total": total_destinations,
+                "total_raw_results": len(all_results),
+                "total_routes": len(final_results),
+                "elapsed_seconds": _elapsed,
+                "api_calls_approx": destinations_searched * len(month_ranges) * len(valid_strategies),
+            },
+            "results": final_results,
+        }
+        _log_file = _test_log_dir / f"{_test_log_id}.json"
+        with open(_log_file, "w") as f:
+            json.dump(_log_entry, f, indent=2, ensure_ascii=False, default=str)
+        logger.info(f"Test log saved: {_log_file.name} ({len(final_results)} routes, {_elapsed}s)")
+    except Exception as e:
+        logger.warning(f"Failed to save test log: {e}")
+
+    return {
+        "results": final_results,
+        "total": len(final_results),
+        "origin": origin_code,
+        "destinations_searched": destinations_searched,
+        "destinations_total": total_destinations,
+        "strategies_used": valid_strategies,
     }

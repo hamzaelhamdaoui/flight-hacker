@@ -1,7 +1,8 @@
 {
   "rewrites": [
     { "source": "/api/:path*", "destination": "http://54.78.58.30:8000/api/:path*" },
-    { "source": "/health", "destination": "http://54.78.58.30:8000/health" }
+    { "source": "/health", "destination": "http://54.78.58.30:8000/health" },
+    { "source": "/go/:code", "destination": "http://54.78.58.30:8000/go/:code" }
   ],
   "headers": [
     {

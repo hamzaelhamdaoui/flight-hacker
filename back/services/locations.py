@@ -40,17 +40,26 @@ async def resolve_location_full(user_input: str) -> dict[str, Any]:
     return {"code": cleaned, "id": cleaned}
 
 
+_nearby_cache: dict[str, list[dict]] = {}
+
 async def get_nearby_airports(code: str, radius_km: int = 250) -> list[dict]:
+    cache_key = f"{code}_{radius_km}"
+    if cache_key in _nearby_cache:
+        return _nearby_cache[cache_key]
+
     client = get_kiwi_client()
     locations = await client.locations_query(code, limit=1)
     if not locations:
+        _nearby_cache[cache_key] = []
         return []
     loc = locations[0]
     lat = loc.get("location", {}).get("lat")
     lon = loc.get("location", {}).get("lon")
     if lat is None or lon is None:
+        _nearby_cache[cache_key] = []
         return []
     airports = await client.locations_radius(lat, lon, radius_km, location_types="airport")
+    _nearby_cache[cache_key] = airports
     return airports
 
 

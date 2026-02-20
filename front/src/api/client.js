@@ -13,38 +13,76 @@ async function request(url, options = {}) {
 }
 
 export async function searchFlights(params) {
-  return request('/api/search', {
+  // Start async job
+  const job = await request('/api/search', {
     method: 'POST',
     body: JSON.stringify(params),
   })
+  if (!job.job_id) return job // direct response fallback
+
+  // Poll for results
+  const jobId = job.job_id
+  const startTime = Date.now()
+  const maxMs = 5 * 60 * 1000 // 5 min max
+
+  while ((Date.now() - startTime) < maxMs) {
+    await new Promise(r => setTimeout(r, 3000))
+    let status
+    try {
+      status = await request(`/api/search/status/${jobId}`)
+    } catch { continue }
+    if (status.status === 'done') return status
+    if (status.status === 'error') throw new Error(status.error || 'Search failed')
+    if (status.status === 'not_found') throw new Error('Job expired or not found')
+  }
+  throw new Error('Search timed out')
 }
 
 export async function exploreFlights(params, onProgress) {
-  const qs = new URLSearchParams()
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== undefined && v !== null && v !== '' && v !== false) qs.set(k, v)
+  // Start async job with POST request
+  const payload = { ...params }
+  // months is already an array, pass as-is
+  const job = await request('/api/explore', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
-  if (params.direct_only === true) qs.set('direct_only', 'true')
-
-  // Start async job
-  const job = await request(`/api/explore?${qs.toString()}`, { method: 'POST' })
   if (!job.job_id) {
     // Fallback: direct response (no async)
     return job
   }
 
-  // Poll for results
+  // Poll for results — adaptive interval: 3s for first 2 min, then 5s
   const jobId = job.job_id
-  const maxAttempts = 120 // 10 min max
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, 3000)) // 3s between polls
-    if (onProgress) onProgress(i)
-    const status = await request(`/api/explore/status/${jobId}`)
+  const maxMinutes = 180 // 3 hours max (large multi-continent searches)
+  const startTime = Date.now()
+  
+  while ((Date.now() - startTime) < maxMinutes * 60 * 1000) {
+    const elapsed = (Date.now() - startTime) / 1000
+    const interval = elapsed < 120 ? 3000 : 5000 // faster at start, slower later
+    await new Promise(r => setTimeout(r, interval))
+    
+    let status
+    try {
+      status = await request(`/api/explore/status/${jobId}`)
+    } catch (err) {
+      // Network hiccup — retry silently
+      continue
+    }
+    
+    // Call onProgress with partial results if available
+    if (onProgress && status.status === 'running') {
+      onProgress(status.progress || 0, status.results || [], {
+        destinations_searched: status.destinations_searched || 0,
+        destinations_total: status.destinations_total || 0,
+        current_destination: status.current_destination || '',
+      })
+    }
+    
     if (status.status === 'done') return status
     if (status.status === 'error') throw new Error(status.error || 'Explore failed')
-    if (status.status === 'not_found') throw new Error('Job expired')
+    if (status.status === 'not_found') throw new Error('Job expired or not found')
   }
-  throw new Error('Explore timed out')
+  throw new Error('Explore timed out after ' + maxMinutes + ' minutes')
 }
 
 export async function fetchLocations(query) {

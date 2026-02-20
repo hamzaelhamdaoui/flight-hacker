@@ -57,6 +57,9 @@ class NearbyAirportStrategy(BaseStrategy):
                 search_params["nights_in_dst_from"] = params["nights_in_dst_from"]
                 search_params["nights_in_dst_to"] = params.get("nights_in_dst_to", params["nights_in_dst_from"])
 
+        if params.get("max_price") is not None:
+            search_params["price_to"] = params["max_price"]
+
         data = await client.search(search_params)
 
         results: list[FlightResult] = []
