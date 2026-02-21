@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Plane, Clock, MapPin, Filter } from 'lucide-react'
+import { Plane, Clock, MapPin, Filter, Settings } from 'lucide-react'
 import Layout from './components/Layout'
 import SearchForm from './components/SearchForm'
 import ResultsView from './components/ResultsView'
 import RouteCard from './components/RouteCard'
+import AdminPanel from './components/AdminPanel'
 import { useSearch } from './hooks/useSearch'
 import { fetchStrategies } from './api/client'
 import { useEffect } from 'react'
@@ -34,6 +35,9 @@ const SORT_OPTIONS = [
 export default function App() {
   const { results, loading, error, search, clearResults, mode, progress, searchStatus, currentStrategy } = useSearch()
 
+  // Navigation state
+  const [activeTab, setActiveTab] = useState('search')
+
   // Explore filters (client-side)
   const [continent, setContinent] = useState('')
   const [maxDuration, setMaxDuration] = useState('')
@@ -61,18 +65,52 @@ export default function App() {
   return (
     <Layout>
       <section className="mx-auto max-w-6xl px-4 py-8 pb-24 md:pb-8">
-        {/* Hero — only before first search */}
-        {!results && !loading && (
-          <div className="text-center mb-8">
-            <h2 className="font-display text-3xl sm:text-5xl font-bold text-warm-900 mb-3 tracking-tight">
-              Hack your next flight
-            </h2>
-            <p className="font-body text-lg text-warm-500 max-w-2xl mx-auto">
-              12 strategies to find prices that Google Flights won't show you.
-              Leave destination empty to explore everywhere.
-            </p>
+        {/* Navigation Tabs */}
+        <div className="flex justify-center mb-6">
+          <div className="flex bg-warm-50 rounded-lg p-1 shadow-sm border border-warm-200">
+            <button
+              onClick={() => setActiveTab('search')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition ${
+                activeTab === 'search'
+                  ? 'bg-white text-warm-900 shadow-sm'
+                  : 'text-warm-600 hover:text-warm-800'
+              }`}
+            >
+              <Plane className="h-4 w-4" />
+              Search
+            </button>
+            <button
+              onClick={() => setActiveTab('admin')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition ${
+                activeTab === 'admin'
+                  ? 'bg-white text-warm-900 shadow-sm'
+                  : 'text-warm-600 hover:text-warm-800'
+              }`}
+            >
+              <Settings className="h-4 w-4" />
+              Admin
+            </button>
           </div>
-        )}
+        </div>
+
+        {/* Admin Panel */}
+        {activeTab === 'admin' && <AdminPanel />}
+
+        {/* Search View */}
+        {activeTab === 'search' && (
+          <>
+            {/* Hero — only before first search */}
+            {!results && !loading && (
+              <div className="text-center mb-8">
+                <h2 className="font-display text-3xl sm:text-5xl font-bold text-warm-900 mb-3 tracking-tight">
+                  Hack your next flight
+                </h2>
+                <p className="font-body text-lg text-warm-500 max-w-2xl mx-auto">
+                  12 strategies to find prices that Google Flights won't show you.
+                  Leave destination empty to explore everywhere.
+                </p>
+              </div>
+            )}
 
         {/* Search form — always present */}
         <div className={`card ${!results && !loading ? 'p-5 sm:p-8 max-w-3xl mx-auto' : 'p-5 sm:p-6 max-w-3xl mx-auto mb-6'}`}>
@@ -196,11 +234,13 @@ export default function App() {
           </>
         )}
 
-        {/* Search results — show even while streaming */}
-        {results && mode === 'search' && (
-          <div className={loading ? 'mt-4' : 'mt-6'}>
-            <ResultsView data={results} onClear={clearResults} isStreaming={loading} />
-          </div>
+            {/* Search results — show even while streaming */}
+            {results && mode === 'search' && (
+              <div className={loading ? 'mt-4' : 'mt-6'}>
+                <ResultsView data={results} onClear={clearResults} isStreaming={loading} />
+              </div>
+            )}
+          </>
         )}
       </section>
     </Layout>

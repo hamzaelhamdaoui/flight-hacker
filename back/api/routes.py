@@ -198,6 +198,824 @@ async def get_strategies() -> StrategiesResponse:
 DEALS_DB = Path("/home/ec2-user/.openclaw/workspace/flights-kiwi/deals-engine/deals.db")
 
 
+# ── Admin Panel API ──────────────────────────────────────────────────────
+
+
+class AdminDealUpdate(BaseModel):
+    origin: Optional[str] = None
+    destination_city: Optional[str] = None
+    destination_code: Optional[str] = None
+    destination_country: Optional[str] = None
+    continent: Optional[str] = None
+    price: Optional[int] = None
+    departure_date: Optional[str] = None
+    nights_in_dest: Optional[int] = None
+    airlines: Optional[str] = None
+    strategy: Optional[str] = None
+    is_direct: Optional[bool] = None
+    published_telegram: Optional[bool] = None
+    published_twitter: Optional[bool] = None
+    published_blog: Optional[bool] = None
+
+
+class AdminQueueItem(BaseModel):
+    deal_id: int
+    position: Optional[int] = None
+    status: Optional[str] = "pending"
+    telegram_copy: Optional[str] = None
+    twitter_copy: Optional[str] = None
+    blog_copy: Optional[str] = None
+    image_url: Optional[str] = None
+    image_query: Optional[str] = None
+    image_path: Optional[str] = None
+    slug: Optional[str] = None
+
+
+class AdminQueueUpdate(BaseModel):
+    position: Optional[int] = None
+    status: Optional[str] = None
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+    destination_country: Optional[str] = None
+    continent: Optional[str] = None
+    price: Optional[float] = None
+    departure_date: Optional[str] = None
+    nights: Optional[int] = None
+    is_direct: Optional[bool] = None
+    airlines: Optional[str] = None
+    duration: Optional[str] = None
+    strategy: Optional[str] = None
+    route_json: Optional[str] = None
+    kiwi_link: Optional[str] = None
+    telegram_copy: Optional[str] = None
+    twitter_copy: Optional[str] = None
+    blog_copy: Optional[str] = None
+    image_url: Optional[str] = None
+    image_query: Optional[str] = None
+    image_path: Optional[str] = None
+    slug: Optional[str] = None
+
+
+class AdminPublishedUpdate(BaseModel):
+    telegram_copy: Optional[str] = None
+    twitter_copy: Optional[str] = None
+    blog_copy: Optional[str] = None
+
+
+class ReorderItem(BaseModel):
+    id: int
+    position: int
+
+
+class ReorderRequest(BaseModel):
+    items: list[ReorderItem]
+
+
+@router.get("/api/admin/deals")
+async def admin_get_deals(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    country: Optional[str] = Query(None),
+    continent: Optional[str] = Query(None), 
+    min_price: Optional[int] = Query(None),
+    max_price: Optional[int] = Query(None),
+    origin: Optional[str] = Query(None),
+    strategy: Optional[str] = Query(None),
+    is_direct: Optional[bool] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sort: str = Query("found_at", enum=["id", "origin", "destination_city", "price", "departure_date", "found_at"]),
+    order: str = Query("desc", enum=["asc", "desc"]),
+):
+    """Get deals with pagination and filters for admin panel."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        conn.row_factory = sqlite3.Row
+        
+        # Build query
+        where_conditions = []
+        params = []
+        
+        if country:
+            where_conditions.append("destination_country LIKE ?")
+            params.append(f"%{country}%")
+            
+        if continent:
+            where_conditions.append("continent = ?")
+            params.append(continent.lower())
+            
+        if min_price is not None:
+            where_conditions.append("price >= ?")
+            params.append(min_price)
+            
+        if max_price is not None:
+            where_conditions.append("price <= ?")
+            params.append(max_price)
+            
+        if origin:
+            where_conditions.append("origin LIKE ?")
+            params.append(f"%{origin}%")
+            
+        if strategy:
+            where_conditions.append("strategy = ?")
+            params.append(strategy)
+            
+        if is_direct is not None:
+            where_conditions.append("is_direct = ?")
+            params.append(1 if is_direct else 0)
+            
+        if date_from:
+            where_conditions.append("departure_date >= ?")
+            params.append(date_from)
+            
+        if date_to:
+            where_conditions.append("departure_date <= ?")
+            params.append(date_to)
+            
+        if search:
+            where_conditions.append("(destination_city LIKE ? OR destination_country LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        
+        where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+        
+        # Get total count
+        count_query = f"SELECT COUNT(*) FROM deals WHERE {where_clause}"
+        total = conn.execute(count_query, params).fetchone()[0]
+        
+        # Get paginated results
+        offset = (page - 1) * limit
+        query = f"""
+            SELECT id, origin, destination_city, destination_code, destination_country,
+                   continent, price, departure_date, nights_in_dest, airlines,
+                   strategy, is_direct, found_at, published_telegram, published_twitter, published_blog
+            FROM deals 
+            WHERE {where_clause}
+            ORDER BY {sort} {order.upper()}
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        
+        deals = []
+        for row in conn.execute(query, params):
+            deals.append({
+                "id": row["id"],
+                "origin": row["origin"],
+                "destination": row["destination_city"],
+                "destination_code": row["destination_code"],
+                "country": row["destination_country"],
+                "continent": row["continent"],
+                "price": row["price"],
+                "departure_date": row["departure_date"],
+                "nights": row["nights_in_dest"] or 0,
+                "airlines": row["airlines"] or "",
+                "strategy": row["strategy"],
+                "is_direct": bool(row["is_direct"]),
+                "found_at": row["found_at"],
+                "published_telegram": bool(row["published_telegram"]),
+                "published_twitter": bool(row["published_twitter"]),
+                "published_blog": bool(row["published_blog"]),
+            })
+        
+        conn.close()
+        
+        return {
+            "deals": deals,
+            "pagination": {
+                "current_page": page,
+                "per_page": limit,
+                "total": total,
+                "total_pages": (total + limit - 1) // limit if total > 0 else 0,
+            },
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.delete("/api/admin/deals/{deal_id}")
+async def admin_delete_deal(deal_id: int):
+    """Delete a deal from admin panel."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Check if deal exists
+        cursor = conn.execute("SELECT id FROM deals WHERE id = ?", (deal_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="Deal not found")
+        
+        # Delete deal
+        conn.execute("DELETE FROM deals WHERE id = ?", (deal_id,))
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Deal deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.put("/api/admin/deals/{deal_id}")
+async def admin_update_deal(deal_id: int, update_data: AdminDealUpdate):
+    """Update a deal from admin panel."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Check if deal exists
+        cursor = conn.execute("SELECT id FROM deals WHERE id = ?", (deal_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="Deal not found")
+        
+        # Build update query
+        update_fields = []
+        params = []
+        
+        for field, value in update_data.dict(exclude_unset=True).items():
+            if field == "is_direct":
+                update_fields.append("is_direct = ?")
+                params.append(1 if value else 0)
+            elif field in ["published_telegram", "published_twitter", "published_blog"]:
+                update_fields.append(f"{field} = ?")
+                params.append(1 if value else 0)
+            else:
+                update_fields.append(f"{field} = ?")
+                params.append(value)
+        
+        if not update_fields:
+            conn.close()
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        query = f"UPDATE deals SET {', '.join(update_fields)} WHERE id = ?"
+        params.append(deal_id)
+        
+        conn.execute(query, params)
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Deal updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.get("/api/admin/queue")
+async def admin_get_queue(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    status: Optional[str] = Query(None, enum=["pending", "ready", "skipped"]),
+    country: Optional[str] = Query(None),
+    continent: Optional[str] = Query(None),
+    min_price: Optional[int] = Query(None),
+    max_price: Optional[int] = Query(None),
+    origin: Optional[str] = Query(None),
+    strategy: Optional[str] = Query(None),
+    is_direct: Optional[bool] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sort: str = Query("position", enum=["id", "position", "origin", "destination", "price", "departure_date", "created_at"]),
+    order: str = Query("asc", enum=["asc", "desc"]),
+):
+    """Get queue items with pagination and filters for admin panel."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        conn.row_factory = sqlite3.Row
+        
+        # Build query
+        where_conditions = []
+        params = []
+        
+        if status:
+            where_conditions.append("status = ?")
+            params.append(status)
+            
+        if country:
+            where_conditions.append("destination_country LIKE ?")
+            params.append(f"%{country}%")
+            
+        if continent:
+            where_conditions.append("continent = ?")
+            params.append(continent.lower())
+            
+        if min_price is not None:
+            where_conditions.append("price >= ?")
+            params.append(min_price)
+            
+        if max_price is not None:
+            where_conditions.append("price <= ?")
+            params.append(max_price)
+            
+        if origin:
+            where_conditions.append("origin LIKE ?")
+            params.append(f"%{origin}%")
+            
+        if strategy:
+            where_conditions.append("strategy = ?")
+            params.append(strategy)
+            
+        if is_direct is not None:
+            where_conditions.append("is_direct = ?")
+            params.append(1 if is_direct else 0)
+            
+        if date_from:
+            where_conditions.append("departure_date >= ?")
+            params.append(date_from)
+            
+        if date_to:
+            where_conditions.append("departure_date <= ?")
+            params.append(date_to)
+            
+        if search:
+            where_conditions.append("(destination LIKE ? OR destination_country LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        
+        where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+        
+        # Get total count
+        count_query = f"SELECT COUNT(*) FROM queue WHERE {where_clause}"
+        total = conn.execute(count_query, params).fetchone()[0]
+        
+        # Get paginated results
+        offset = (page - 1) * limit
+        query = f"""
+            SELECT id, deal_id, position, status, origin, destination, destination_country,
+                   continent, price, departure_date, nights, is_direct, airlines,
+                   duration, strategy, telegram_copy, created_at, updated_at
+            FROM queue 
+            WHERE {where_clause}
+            ORDER BY {sort} {order.upper()}
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        
+        queue_items = []
+        for row in conn.execute(query, params):
+            queue_items.append({
+                "id": row["id"],
+                "deal_id": row["deal_id"],
+                "position": row["position"],
+                "status": row["status"],
+                "origin": row["origin"],
+                "destination": row["destination"],
+                "country": row["destination_country"],
+                "continent": row["continent"],
+                "price": row["price"],
+                "departure_date": row["departure_date"],
+                "nights": row["nights"] or 0,
+                "is_direct": bool(row["is_direct"]),
+                "airlines": row["airlines"] or "",
+                "duration": row["duration"] or "",
+                "strategy": row["strategy"],
+                "telegram_copy": row["telegram_copy"] or "",
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            })
+        
+        conn.close()
+        
+        return {
+            "queue": queue_items,
+            "pagination": {
+                "current_page": page,
+                "per_page": limit,
+                "total": total,
+                "total_pages": (total + limit - 1) // limit if total > 0 else 0,
+            },
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.post("/api/admin/queue")
+async def admin_add_to_queue(queue_item: AdminQueueItem):
+    """Add a deal to the publication queue."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        conn.row_factory = sqlite3.Row
+        
+        # Check if deal exists
+        deal_row = conn.execute("""
+            SELECT id, origin, destination_city, destination_country, continent,
+                   price, departure_date, nights_in_dest, is_direct, airlines,
+                   strategy, deep_link, route_json
+            FROM deals WHERE id = ?
+        """, (queue_item.deal_id,)).fetchone()
+        
+        if not deal_row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Deal not found")
+        
+        # Check if deal is already in queue
+        existing = conn.execute("SELECT id FROM queue WHERE deal_id = ?", (queue_item.deal_id,)).fetchone()
+        if existing:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Deal already in queue")
+        
+        # Get next position if not specified
+        position = queue_item.position
+        if position is None:
+            cursor = conn.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue")
+            position = cursor.fetchone()[0]
+        
+        # Insert into queue
+        conn.execute("""
+            INSERT INTO queue (
+                deal_id, position, status, origin, destination, destination_country,
+                continent, price, departure_date, nights, is_direct, airlines,
+                strategy, kiwi_link, route_json, telegram_copy, twitter_copy,
+                blog_copy, image_url, image_query, image_path, slug
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            queue_item.deal_id, position, queue_item.status,
+            deal_row["origin"], deal_row["destination_city"], deal_row["destination_country"],
+            deal_row["continent"], deal_row["price"], deal_row["departure_date"],
+            deal_row["nights_in_dest"] or 0, deal_row["is_direct"] or 0, deal_row["airlines"],
+            deal_row["strategy"], deal_row["deep_link"], deal_row["route_json"],
+            queue_item.telegram_copy, queue_item.twitter_copy, queue_item.blog_copy,
+            queue_item.image_url, queue_item.image_query, queue_item.image_path, queue_item.slug
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Deal added to queue successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.put("/api/admin/queue/{queue_id}")
+async def admin_update_queue(queue_id: int, update_data: AdminQueueUpdate):
+    """Update a queue item."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Check if queue item exists
+        cursor = conn.execute("SELECT id FROM queue WHERE id = ?", (queue_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="Queue item not found")
+        
+        # Build update query
+        update_fields = []
+        params = []
+        
+        for field, value in update_data.dict(exclude_unset=True).items():
+            if field == "is_direct":
+                update_fields.append("is_direct = ?")
+                params.append(1 if value else 0)
+            else:
+                update_fields.append(f"{field} = ?")
+                params.append(value)
+        
+        # Always update updated_at
+        update_fields.append("updated_at = ?")
+        params.append(datetime.utcnow().isoformat())
+        
+        if len(update_fields) <= 1:  # Only updated_at
+            conn.close()
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        query = f"UPDATE queue SET {', '.join(update_fields)} WHERE id = ?"
+        params.append(queue_id)
+        
+        conn.execute(query, params)
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Queue item updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.delete("/api/admin/queue/{queue_id}")
+async def admin_delete_queue(queue_id: int):
+    """Delete a queue item."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Check if queue item exists
+        cursor = conn.execute("SELECT id FROM queue WHERE id = ?", (queue_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="Queue item not found")
+        
+        # Delete queue item
+        conn.execute("DELETE FROM queue WHERE id = ?", (queue_id,))
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Queue item deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.post("/api/admin/queue/reorder")
+async def admin_reorder_queue(reorder_data: ReorderRequest):
+    """Reorder queue items."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Update positions
+        for item in reorder_data.items:
+            conn.execute(
+                "UPDATE queue SET position = ?, updated_at = ? WHERE id = ?",
+                (item.position, datetime.utcnow().isoformat(), item.id)
+            )
+        
+        conn.commit()
+        conn.close()
+        
+        return {"message": f"Reordered {len(reorder_data.items)} queue items"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.get("/api/admin/published")
+async def admin_get_published(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    country: Optional[str] = Query(None),
+    continent: Optional[str] = Query(None),
+    min_price: Optional[int] = Query(None),
+    max_price: Optional[int] = Query(None),
+    origin: Optional[str] = Query(None),
+    strategy: Optional[str] = Query(None),
+    is_direct: Optional[bool] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sort: str = Query("published_at", enum=["id", "origin", "destination", "price", "departure_date", "published_at"]),
+    order: str = Query("desc", enum=["asc", "desc"]),
+):
+    """Get published items with pagination and filters for admin panel."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        conn.row_factory = sqlite3.Row
+        
+        # Build query
+        where_conditions = []
+        params = []
+        
+        if country:
+            where_conditions.append("destination_country LIKE ?")
+            params.append(f"%{country}%")
+            
+        if continent:
+            where_conditions.append("continent = ?")
+            params.append(continent.lower())
+            
+        if min_price is not None:
+            where_conditions.append("price >= ?")
+            params.append(min_price)
+            
+        if max_price is not None:
+            where_conditions.append("price <= ?")
+            params.append(max_price)
+            
+        if origin:
+            where_conditions.append("origin LIKE ?")
+            params.append(f"%{origin}%")
+            
+        if strategy:
+            where_conditions.append("strategy = ?")
+            params.append(strategy)
+            
+        if is_direct is not None:
+            where_conditions.append("is_direct = ?")
+            params.append(1 if is_direct else 0)
+            
+        if date_from:
+            where_conditions.append("departure_date >= ?")
+            params.append(date_from)
+            
+        if date_to:
+            where_conditions.append("departure_date <= ?")
+            params.append(date_to)
+            
+        if search:
+            where_conditions.append("(destination LIKE ? OR destination_country LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        
+        where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+        
+        # Get total count
+        count_query = f"SELECT COUNT(*) FROM published WHERE {where_clause}"
+        total = conn.execute(count_query, params).fetchone()[0]
+        
+        # Get paginated results
+        offset = (page - 1) * limit
+        query = f"""
+            SELECT id, deal_id, origin, destination, destination_country, continent,
+                   price, departure_date, nights, is_direct, airlines, strategy,
+                   telegram_copy, twitter_copy, blog_copy, telegram_sent, twitter_sent,
+                   published_at
+            FROM published 
+            WHERE {where_clause}
+            ORDER BY {sort} {order.upper()}
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        
+        published_items = []
+        for row in conn.execute(query, params):
+            published_items.append({
+                "id": row["id"],
+                "deal_id": row["deal_id"],
+                "origin": row["origin"],
+                "destination": row["destination"],
+                "country": row["destination_country"],
+                "continent": row["continent"],
+                "price": row["price"],
+                "departure_date": row["departure_date"],
+                "nights": row["nights"] or 0,
+                "is_direct": bool(row["is_direct"]),
+                "airlines": row["airlines"] or "",
+                "strategy": row["strategy"],
+                "telegram_copy": row["telegram_copy"] or "",
+                "twitter_copy": row["twitter_copy"] or "",
+                "blog_copy": row["blog_copy"] or "",
+                "telegram_sent": bool(row["telegram_sent"]),
+                "twitter_sent": bool(row["twitter_sent"]),
+                "published_at": row["published_at"],
+            })
+        
+        conn.close()
+        
+        return {
+            "published": published_items,
+            "pagination": {
+                "current_page": page,
+                "per_page": limit,
+                "total": total,
+                "total_pages": (total + limit - 1) // limit if total > 0 else 0,
+            },
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.put("/api/admin/published/{published_id}")
+async def admin_update_published(published_id: int, update_data: AdminPublishedUpdate):
+    """Update a published item."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Check if published item exists
+        cursor = conn.execute("SELECT id FROM published WHERE id = ?", (published_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="Published item not found")
+        
+        # Build update query
+        update_fields = []
+        params = []
+        
+        for field, value in update_data.dict(exclude_unset=True).items():
+            update_fields.append(f"{field} = ?")
+            params.append(value)
+        
+        if not update_fields:
+            conn.close()
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        query = f"UPDATE published SET {', '.join(update_fields)} WHERE id = ?"
+        params.append(published_id)
+        
+        conn.execute(query, params)
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Published item updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.delete("/api/admin/published/{published_id}")
+async def admin_delete_published(published_id: int):
+    """Delete a published item."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Check if published item exists
+        cursor = conn.execute("SELECT id FROM published WHERE id = ?", (published_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="Published item not found")
+        
+        # Delete published item
+        conn.execute("DELETE FROM published WHERE id = ?", (published_id,))
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Published item deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@router.get("/api/admin/stats")
+async def admin_get_stats():
+    """Get admin dashboard statistics."""
+    if not DEALS_DB.exists():
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        conn = sqlite3.connect(str(DEALS_DB))
+        
+        # Get counts
+        total_deals = conn.execute("SELECT COUNT(*) FROM deals").fetchone()[0]
+        total_queue = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
+        total_published = conn.execute("SELECT COUNT(*) FROM published").fetchone()[0]
+        
+        # Deals today
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        deals_today = conn.execute(
+            "SELECT COUNT(*) FROM deals WHERE DATE(found_at) = ?", (today,)
+        ).fetchone()[0]
+        
+        # Last scan
+        last_scan_row = conn.execute(
+            "SELECT MAX(found_at) FROM deals"
+        ).fetchone()
+        last_scan_at = last_scan_row[0] if last_scan_row and last_scan_row[0] else None
+        
+        # Last publish
+        last_publish_row = conn.execute(
+            "SELECT MAX(published_at) FROM published"
+        ).fetchone()
+        last_publish_at = last_publish_row[0] if last_publish_row and last_publish_row[0] else None
+        
+        conn.close()
+        
+        return {
+            "total_deals": total_deals,
+            "total_queue": total_queue,
+            "total_published": total_published,
+            "deals_today": deals_today,
+            "last_scan_at": last_scan_at,
+            "last_publish_at": last_publish_at,
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
 @router.get("/api/publications")
 async def get_publications(
     page: int = Query(1, ge=1),
@@ -212,11 +1030,11 @@ async def get_publications(
 
     offset = (page - 1) * per_page
     rows = conn.execute(
-        "SELECT * FROM publications ORDER BY published_at DESC LIMIT ? OFFSET ?",
+        "SELECT * FROM published ORDER BY published_at DESC LIMIT ? OFFSET ?",
         (per_page, offset),
     ).fetchall()
 
-    total = conn.execute("SELECT COUNT(*) FROM publications").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM published").fetchone()[0]
     conn.close()
 
     publications = []
@@ -263,7 +1081,7 @@ async def get_publication_by_slug(slug: str):
 
     conn = sqlite3.connect(str(DEALS_DB))
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM publications WHERE slug = ?", (slug,)).fetchone()
+    row = conn.execute("SELECT * FROM published WHERE slug = ?", (slug,)).fetchone()
     conn.close()
 
     if not row:
