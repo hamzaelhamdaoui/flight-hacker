@@ -30,6 +30,11 @@ class EverywhereStrategy(BaseStrategy):
         else:
             search_params.pop("one_for_city", None)
 
+        if params.get("flight_type") != "oneway":
+            if params.get("return_from"):
+                search_params["return_from"] = params["return_from"]
+            if params.get("return_to"):
+                search_params["return_to"] = params["return_to"]
         if params.get("nights_in_dst_from") is not None:
             search_params["nights_in_dst_from"] = params["nights_in_dst_from"]
             search_params["nights_in_dst_to"] = params.get("nights_in_dst_to", params["nights_in_dst_from"])
